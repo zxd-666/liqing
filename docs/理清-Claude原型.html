@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>理清 · AI 脑图</title>
+<style>
+  :root{
+    --bg:#ffffff;
+    --ink:#1c1d1f;
+    --ink-soft:#6b6e76;
+    --line:#e3e4e8;
+    --line-strong:#c9cbd1;
+    --accent:#2f6df4;
+    --accent-soft:#eaf1ff;
+    --card:#ffffff;
+    --shadow:0 1px 2px rgba(20,22,30,.04),0 4px 16px rgba(20,22,30,.06);
+    --q:#8a6d00;
+    --q-bg:#fff8e6;
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;margin:0;}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    color:var(--ink);background:var(--bg);overflow:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+
+  /* ---------- 顶栏 ---------- */
+  #topbar{
+    position:fixed;top:0;left:0;right:0;height:56px;z-index:30;
+    display:flex;align-items:center;gap:14px;padding:0 20px;
+    background:rgba(255,255,255,.82);backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--line);
+  }
+  #topbar.hidden{display:none;}
+  .logo{font-weight:700;font-size:17px;letter-spacing:.5px;display:flex;align-items:center;gap:7px;}
+  .logo .dot{width:9px;height:9px;border-radius:50%;background:var(--accent);display:inline-block;}
+  .topic-text{font-size:13px;color:var(--ink-soft);max-width:340px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .type-tag{
+    position:relative;display:inline-flex;align-items:center;gap:6px;
+    font-size:12.5px;color:var(--accent);background:var(--accent-soft);
+    padding:5px 10px;border-radius:20px;cursor:pointer;user-select:none;border:1px solid transparent;
+  }
+  .type-tag:hover{border-color:#cfe0ff;}
+  .type-tag .caret{font-size:9px;opacity:.6;}
+  .type-menu{
+    position:absolute;top:34px;left:0;background:#fff;border:1px solid var(--line);
+    border-radius:12px;box-shadow:var(--shadow);padding:6px;min-width:150px;display:none;z-index:40;
+  }
+  .type-menu.open{display:block;}
+  .type-menu div{padding:8px 10px;border-radius:8px;font-size:13px;color:var(--ink);cursor:pointer;}
+  .type-menu div:hover{background:#f4f5f7;}
+  .type-menu div.on{color:var(--accent);font-weight:600;}
+  .spacer{flex:1;}
+  .tbtn{
+    font-size:13px;color:var(--ink-soft);background:transparent;border:1px solid var(--line);
+    padding:7px 13px;border-radius:9px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;
+  }
+  .tbtn:hover{border-color:var(--line-strong);color:var(--ink);}
+
+  /* ---------- 画布 ---------- */
+  #canvas{position:fixed;inset:0;cursor:grab;
+    background-image:radial-gradient(circle, #ededf1 1px, transparent 1px);
+    background-size:26px 26px;}
+  #canvas.grabbing{cursor:grabbing;}
+  #world{position:absolute;left:50%;top:50%;transform-origin:0 0;}
+  #edges{position:absolute;left:0;top:0;width:1px;height:1px;overflow:visible;pointer-events:none;}
+  #edges path{fill:none;stroke:var(--line-strong);stroke-width:1.5;opacity:0;transition:opacity .5s ease;}
+  #edges path.show{opacity:1;}
+  #nodes{position:absolute;left:0;top:0;width:1px;height:1px;}
+
+  .node{
+    position:absolute;transform:translate(-50%,-50%) scale(.82);opacity:0;
+    transition:opacity .42s cubic-bezier(.2,.8,.2,1),transform .42s cubic-bezier(.2,.8,.2,1);
+    will-change:transform,opacity;
+  }
+  .node.show{opacity:1;transform:translate(-50%,-50%) scale(1);}
+  .node .card{
+    background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:9px 13px;font-size:13.5px;line-height:1.45;color:var(--ink);
+    white-space:nowrap;box-shadow:var(--shadow);cursor:pointer;position:relative;
+    transition:border-color .15s,box-shadow .15s,transform .1s;
+  }
+  .node .card:hover{border-color:var(--line-strong);}
+  .node.sel .card{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);}
+  .node.root .card{
+    background:var(--ink);color:#fff;border-color:var(--ink);font-size:15px;font-weight:600;
+    padding:12px 18px;border-radius:14px;
+  }
+  .node.d1 .card{font-weight:600;}
+  .node.q .card{background:var(--q-bg);border-color:#f0e3b8;color:var(--q);font-size:12.8px;}
+  .node.q .card::before{content:"AI 追问";display:block;font-size:10px;letter-spacing:.5px;opacity:.65;margin-bottom:2px;}
+  .node.ask .card{background:var(--accent-soft);border-color:#cfe0ff;color:#234aa8;font-size:12.8px;}
+  .node.ask .card::before{content:"你问";display:block;font-size:10px;letter-spacing:.5px;opacity:.7;margin-bottom:2px;}
+  .node.ans .card{background:#eef7f1;border-color:#cfe6d6;color:#1f6043;font-size:12.8px;}
+  .node.ans .card::before{content:"AI 答";display:block;font-size:10px;letter-spacing:.5px;opacity:.7;margin-bottom:2px;}
+  .edit-input{border:none;outline:none;background:transparent;font:inherit;color:inherit;min-width:60px;}
+  .badge{
+    position:absolute;top:-8px;right:-8px;background:var(--accent);color:#fff;font-size:10px;
+    width:17px;height:17px;border-radius:50%;display:none;align-items:center;justify-content:center;
+  }
+  .node.haskids .badge{display:flex;}
+  .node.collapsed .badge{background:#fff;color:var(--accent);border:1.5px solid var(--accent);}
+
+  /* ---------- 节点操作条 ---------- */
+  #actionbar{
+    position:fixed;z-index:50;display:none;gap:2px;background:#1f2024;border-radius:11px;
+    padding:4px;box-shadow:0 8px 30px rgba(0,0,0,.22);transform:translate(-50%,-100%);
+  }
+  #actionbar.show{display:flex;}
+  #actionbar button{
+    background:transparent;border:none;color:#e8e9ec;font-size:12.5px;padding:6px 11px;border-radius:7px;
+    cursor:pointer;display:flex;align-items:center;gap:5px;white-space:nowrap;font-family:inherit;
+  }
+  #actionbar button:hover{background:rgba(255,255,255,.13);}
+  #actionbar button.danger:hover{background:#7a2230;color:#ffd5dc;}
+  #actionbar .sep{width:1px;background:rgba(255,255,255,.15);margin:4px 2px;}
+
+  /* ---------- 底部输入 ---------- */
+  #dock{
+    position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:30;
+    width:min(620px,92vw);display:none;
+  }
+  #dock.show{display:block;}
+  .dock-ctx{
+    display:none;align-items:center;gap:7px;font-size:12.5px;color:var(--ink-soft);
+    background:#fff;border:1px solid var(--line);border-radius:11px;padding:6px 11px;margin:0 auto 8px;width:fit-content;
+    box-shadow:var(--shadow);
+  }
+  .dock-ctx.show{display:inline-flex;}
+  .dock-ctx b{color:var(--accent);font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .dock-ctx .x{cursor:pointer;opacity:.55;font-size:13px;padding:0 2px;}
+  .dock-ctx .x:hover{opacity:1;}
+  #toast{
+    position:fixed;left:50%;top:74px;transform:translateX(-50%) translateY(-8px);z-index:60;
+    background:#1f2024;color:#fff;font-size:13px;padding:9px 16px;border-radius:10px;
+    box-shadow:0 8px 30px rgba(0,0,0,.22);opacity:0;pointer-events:none;transition:.28s;
+  }
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+  .dock-inner{
+    display:flex;align-items:center;gap:8px;background:#fff;border:1px solid var(--line-strong);
+    border-radius:16px;padding:7px 7px 7px 16px;box-shadow:0 6px 26px rgba(20,22,30,.10);
+  }
+  .dock-inner input{flex:1;border:none;outline:none;font-size:14.5px;background:transparent;font-family:inherit;color:var(--ink);}
+  .send{
+    background:var(--accent);color:#fff;border:none;width:38px;height:38px;border-radius:11px;
+    cursor:pointer;font-size:17px;display:flex;align-items:center;justify-content:center;flex:none;
+  }
+  .send:disabled{opacity:.45;cursor:default;}
+  .dock-hint{text-align:center;font-size:11.5px;color:#a6a8b0;margin-top:7px;}
+
+  /* ---------- 起始页 ---------- */
+  #hero{
+    position:fixed;inset:0;z-index:20;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;background:var(--bg);padding:20px;
+    transition:opacity .4s;
+  }
+  #hero.gone{opacity:0;pointer-events:none;}
+  .hero-logo{font-size:40px;font-weight:800;letter-spacing:4px;margin-bottom:10px;}
+  .hero-logo .dot{display:inline-block;width:13px;height:13px;border-radius:50%;background:var(--accent);margin-left:2px;transform:translateY(-2px);}
+  .hero-sub{color:var(--ink-soft);font-size:15px;margin-bottom:34px;}
+  .hero-input{width:min(580px,92vw);}
+  .hero-input .dock-inner{padding:10px 10px 10px 18px;border-radius:18px;}
+  .hero-input input{font-size:16px;}
+  .chips{display:flex;flex-wrap:wrap;gap:9px;justify-content:center;margin-top:22px;width:min(580px,92vw);}
+  .chip{
+    font-size:13px;color:var(--ink-soft);background:#f5f6f8;border:1px solid var(--line);
+    padding:8px 14px;border-radius:20px;cursor:pointer;transition:.15s;
+  }
+  .chip:hover{background:#fff;border-color:var(--line-strong);color:var(--ink);}
+  .chip b{color:var(--accent);font-weight:600;margin-right:5px;}
+
+  /* 生成中 */
+  #loading{position:fixed;inset:0;z-index:25;display:none;align-items:center;justify-content:center;
+    flex-direction:column;gap:16px;background:rgba(255,255,255,.7);backdrop-filter:blur(2px);}
+  #loading.show{display:flex;}
+  .pulse{display:flex;gap:7px;}
+  .pulse span{width:10px;height:10px;border-radius:50%;background:var(--accent);animation:bounce 1s infinite ease-in-out;}
+  .pulse span:nth-child(2){animation-delay:.15s;} .pulse span:nth-child(3){animation-delay:.3s;}
+  @keyframes bounce{0%,80%,100%{transform:scale(.5);opacity:.4;}40%{transform:scale(1);opacity:1;}}
+  #loading .txt{color:var(--ink-soft);font-size:14px;}
+
+  /* 缩放控制 */
+  #zoomctl{position:fixed;right:18px;bottom:22px;z-index:30;display:none;flex-direction:column;
+    background:#fff;border:1px solid var(--line);border-radius:11px;box-shadow:var(--shadow);overflow:hidden;}
+  #zoomctl.show{display:flex;}
+  #zoomctl button{width:38px;height:36px;border:none;background:#fff;cursor:pointer;font-size:17px;color:var(--ink-soft);}
+  #zoomctl button:hover{background:#f4f5f7;color:var(--ink);}
+  #zoomctl button:not(:last-child){border-bottom:1px solid var(--line);}
+</style>
+</head>
+<body>
+
+<!-- 顶栏 -->
+<div id="topbar" class="hidden">
+  <div class="logo"><span class="dot"></span>理清</div>
+  <div class="type-tag" id="typeTag">
+    <span id="typeName">决策</span><span class="caret">▼</span>
+    <div class="type-menu" id="typeMenu"></div>
+  </div>
+  <div class="topic-text" id="topicText"></div>
+  <div class="spacer"></div>
+  <button class="tbtn" id="exportBtn">⬇ 导出图片</button>
+  <button class="tbtn" id="umlBtn">⧉ 复制 PlantUML</button>
+  <button class="tbtn" id="regenBtn">⟲ 重新生成</button>
+  <button class="tbtn" id="newBtn">＋ 理清新事</button>
+</div>
+
+<!-- 画布 -->
+<div id="canvas">
+  <div id="world">
+    <svg id="edges"><g id="edgesG"></g></svg>
+    <div id="nodes"></div>
+  </div>
+</div>
+
+<!-- 节点操作条 -->
+<div id="actionbar">
+  <button data-act="dig">⤵ 深挖</button>
+  <button data-act="ask">？ 追问</button>
+  <button data-act="add">＋ 补充</button>
+  <span class="sep"></span>
+  <button data-act="del" class="danger">✕ 删除</button>
+</div>
+
+<!-- 缩放 -->
+<div id="zoomctl">
+  <button id="zin">＋</button>
+  <button id="zfit">⊡</button>
+  <button id="zout">－</button>
+</div>
+
+<!-- 底部输入 -->
+<div id="dock">
+  <div class="dock-ctx" id="dockCtx"></div>
+  <div class="dock-inner">
+    <input id="dockInput" placeholder="继续追加分支，或换个角度理清…" />
+    <button class="send" id="dockSend">↑</button>
+  </div>
+  <div class="dock-hint">单击节点选中后输入 = 对它追问/补充 · 双击节点改文字 · 拖拽空白处移动 · 滚轮缩放</div>
+</div>
+
+<div id="toast"></div>
+
+<!-- 生成中 -->
+<div id="loading"><div class="pulse"><span></span><span></span><span></span></div><div class="txt">正在理清…</div></div>
+
+<!-- 起始页 -->
+<div id="hero">
+  <div class="hero-logo">理清<span class="dot"></span></div>
+  <div class="hero-sub">把一团模糊的事，一句话交给 AI，理成一张看得清的脑图</div>
+  <div class="hero-input">
+    <div class="dock-inner">
+      <input id="heroInput" placeholder="你想理清什么？比如：我要不要离职…" autofocus />
+      <button class="send" id="heroSend">↑</button>
+    </div>
+  </div>
+  <div class="chips" id="chips"></div>
+</div>
+
+<script>
+/* =========================================================
+   数据层：类型骨架 + 演示用富数据
+   ========================================================= */
+const TYPES = {
+  decision:{name:"决策", skeleton:["留下 / 支持的理由","改变 / 反对的理由","潜在风险","你真正想要的"]},
+  cause:   {name:"找根因", skeleton:["表面现象","可能的原因","最可疑的根因","如何验证"]},
+  concept: {name:"搞懂概念", skeleton:["是什么","为什么存在","怎么运作","常见误区"]},
+  plan:    {name:"做规划", skeleton:["目标","关键步骤","所需资源","风险点"]},
+};
+
+// 关键词 → 类型识别
+function detectType(text){
+  const t = text.toLowerCase();
+  const rules = [
+    ["decision", ["要不要","该不该","还是","选择","抉择","纠结","值不值","vs","哪个好","去还是留"]],
+    ["cause",    ["为什么","为啥","怎么会","原因","总是","老是","根因","导致","延期","失败","卡住"]],
+    ["concept",  ["什么是","是什么","搞懂","理解","概念","原理","区别","到底是","科普"]],
+    ["plan",     ["策划","计划","规划","方案","如何做","怎么做","怎么准备","流程","步骤","上线","落地"]],
+  ];
+  for(const [type,kws] of rules){ if(kws.some(k=>t.includes(k))) return type; }
+  return "decision";
+}
+
+// 演示用富数据：命中关键词时给出有血有肉的二级内容
+const RICH = [
+  {match:["离职","辞职","跳槽","换工作"], type:"decision", data:{
+    "留下 / 支持的理由":["收入稳定有保障","熟悉的环境和流程","同事关系不错"],
+    "改变 / 反对的理由":["成长明显停滞","看不到晋升空间","想换个赛道试试"],
+    "潜在风险":["新工作存在不确定性","可能有收入空窗期","重新适应的成本"],
+    "你真正想要的":["更高的成长速度？","更高的薪水？","还是更轻松的状态？"],
+  }},
+  {match:["延期","跳票","总是延","推不动","进度慢"], type:"cause", data:{
+    "表面现象":["deadline 一再后移","多次承诺又跳票"],
+    "可能的原因":["需求频繁变更","人手不足","估时过于乐观","依赖方拖延"],
+    "最可疑的根因":["需求没冻结，反复返工"],
+    "如何验证":["复盘最近 3 次需求变更","统计返工占用的工时"],
+  }},
+  {match:["期权","股权","esop","行权"], type:"concept", data:{
+    "是什么":["未来按约定价买公司股票的权利"],
+    "为什么存在":["激励员工长期投入","用未来收益绑定利益"],
+    "怎么运作":["行权价（约定的价格）","归属期 Vesting（逐年解锁）","行权窗口"],
+    "常见误区":["期权 ≠ 已到手的股票","公司没起来可能一文不值","行权 / 出售要交税"],
+  }},
+  {match:["发布会","新品","活动策划","上线活动"], type:"plan", data:{
+    "目标":["媒体曝光量","用户预约 / 留资","引导销量转化"],
+    "关键步骤":["定主题与卖点","场地与布置","邀约嘉宾媒体","流程彩排","现场 + 直播"],
+    "所需资源":["预算","物料设计","执行人力","传播渠道"],
+    "风险点":["设备 / 网络故障","嘉宾临时爽约","到场或流量不及预期"],
+  }},
+];
+
+function buildTree(text, forceType){
+  const rich = RICH.find(r=>r.match.some(m=>text.toLowerCase().includes(m)));
+  const type = forceType || (rich ? rich.type : detectType(text));
+  const skeleton = TYPES[type].skeleton;
+  const root = node(text, true);
+  skeleton.forEach(label=>{
+    const branch = node(label);
+    // 富数据：若该类型与命中数据一致，填充子节点
+    if(rich && rich.type===type && rich.data[label]){
+      rich.data[label].forEach(c=> branch.children.push(node(c)));
+    }
+    root.children.push(branch);
+  });
+  return {root, type};
+}
+
+/* =========================================================
+   节点模型 + 布局
+   ========================================================= */
+let _id=0;
+function node(text, isRoot=false){ return {id:++_id, text, isRoot, children:[], collapsed:false}; }
+
+const ROW=74, HGAP=300;
+function measure(n){
+  if(n.collapsed || !n.children.length){ n._h=ROW; return ROW; }
+  let h=0; n.children.forEach(c=>h+=measure(c)); n._h=h; return h;
+}
+function place(n, depth, dir, top){
+  n._depth=depth; n._dir=dir;
+  n._x = dir*depth*HGAP;
+  if(n.collapsed || !n.children.length){ n._y = top + n._h/2; }
+  else{
+    let cy=top;
+    n.children.forEach(c=>{ place(c, depth+1, dir, cy); cy+=c._h; });
+    n._y = (n.children[0]._y + n.children[n.children.length-1]._y)/2;
+  }
+}
+function layout(root){
+  root._x=0; root._y=0; root._depth=0;
+  const kids=root.children;
+  // 所有节点统一向右展开（经典左→右树）
+  let total=0; kids.forEach(k=>total+=measure(k));
+  let cy=-total/2;
+  kids.forEach(k=>{ place(k,1,1,cy); cy+=k._h; });
+}
+
+/* =========================================================
+   渲染
+   ========================================================= */
+const edgesSvg=document.getElementById("edges");
+const edgesG=document.getElementById("edgesG");
+const nodesLayer=document.getElementById("nodes");
+const world=document.getElementById("world");
+let state={root:null, type:"decision"};
+let prevIds=new Set();
+let nodeEls={};
+
+function allNodes(root){ const a=[]; (function w(n){a.push(n); if(!n.collapsed)n.children.forEach(w);})(root); return a; }
+
+function fullRender(animateAll=false){
+  if(!state.root) return;
+  layout(state.root);
+  edgesG.innerHTML=""; nodesLayer.innerHTML=""; nodeEls={};
+  const nodes=allNodes(state.root);
+
+  // 边
+  const paths=[];
+  nodes.forEach(n=>{ if(n.collapsed) return; n.children.forEach(c=>{
+    const p=document.createElementNS("http://www.w3.org/2000/svg","path");
+    const mx=(n._x+c._x)/2;
+    p.setAttribute("d",`M${n._x},${n._y} C${mx},${n._y} ${mx},${c._y} ${c._x},${c._y}`);
+    edgesG.appendChild(p); paths.push({p, depth:c._depth, isNew: animateAll||!prevIds.has(c.id)});
+  });});
+
+  // 节点
+  nodes.forEach(n=>{
+    const el=document.createElement("div");
+    el.className="node"+(n.isRoot?" root":"")+(n._depth===1?" d1":"")+(n.isQ?" q":"")+(n.isAsk?" ask":"")+(n.isAns?" ans":"");
+    if(n.children.length) el.classList.add("haskids");
+    if(n.collapsed) el.classList.add("collapsed");
+    el.style.left=n._x+"px"; el.style.top=n._y+"px";
+    el.innerHTML=`<div class="card">${escapeHtml(n.text)}<span class="badge">${n.collapsed?n.children.length:"−"}</span></div>`;
+    el.dataset.id=n.id;
+    nodesLayer.appendChild(el); nodeEls[n.id]=el;
+
+    const card=el.querySelector(".card");
+    card.addEventListener("click",(e)=>{ e.stopPropagation(); selectNode(n,el); });
+    card.addEventListener("dblclick",(e)=>{ e.stopPropagation(); startEdit(n,el); });
+    el.querySelector(".badge").addEventListener("click",(e)=>{ e.stopPropagation(); n.collapsed=!n.collapsed; fullRender(); });
+  });
+
+  // 重新渲染后恢复选中态
+  if(selected && nodeEls[selected.id]) nodeEls[selected.id].classList.add("sel");
+
+  // 入场动画
+  requestAnimationFrame(()=>{
+    nodes.forEach(n=>{
+      const el=nodeEls[n.id]; const isNew=animateAll||!prevIds.has(n.id);
+      if(isNew){ el.style.transitionDelay=(n._depth*70)+"ms"; }
+      el.classList.add("show");
+    });
+    paths.forEach(({p,depth,isNew})=>{ if(isNew) p.style.transitionDelay=(depth*70)+"ms"; requestAnimationFrame(()=>p.classList.add("show")); });
+  });
+
+  prevIds=new Set(nodes.map(n=>n.id));
+}
+function escapeHtml(s){return s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+function escapeAttr(s){return s.replace(/"/g,"&quot;").replace(/</g,"&lt;");}
+
+/* 双击行内编辑节点文字 */
+function startEdit(n,el){
+  hideActionbar();
+  const card=el.querySelector(".card");
+  const old=n.text;
+  card.innerHTML=`<input class="edit-input" value="${escapeAttr(n.text)}">`;
+  const inp=card.querySelector("input");
+  const grow=()=>{ inp.style.width=Math.max(4,inp.value.length+1)+"ch"; };
+  grow(); inp.focus(); inp.select();
+  inp.addEventListener("input",grow);
+  ["click","mousedown","dblclick"].forEach(ev=>inp.addEventListener(ev,e=>e.stopPropagation()));
+  const commit=()=>{ const v=inp.value.trim(); n.text=v||old; fullRender(); if(selected===n)positionActionbar(); };
+  inp.addEventListener("keydown",e=>{
+    if(e.key==="Enter"){ e.preventDefault(); inp.blur(); }
+    else if(e.key==="Escape"){ inp.removeEventListener("blur",commit); n.text=old; fullRender(); }
+  });
+  inp.addEventListener("blur",commit);
+}
+
+/* =========================================================
+   画布 平移 / 缩放
+   ========================================================= */
+const canvas=document.getElementById("canvas");
+let view={x:0,y:0,s:1};
+function applyView(){ world.style.transform=`translate(${view.x}px,${view.y}px) scale(${view.s})`; positionActionbar(); }
+function fit(){
+  if(!state.root) return;
+  const nodes=allNodes(state.root);
+  let minX=1e9,maxX=-1e9,minY=1e9,maxY=-1e9;
+  nodes.forEach(n=>{minX=Math.min(minX,n._x-110);maxX=Math.max(maxX,n._x+110);minY=Math.min(minY,n._y-40);maxY=Math.max(maxY,n._y+40);});
+  const w=maxX-minX,h=maxY-minY;
+  const s=Math.min(1, Math.min((innerWidth-120)/w,(innerHeight-200)/h));
+  view.s=Math.max(.4,s);
+  view.x=-((minX+maxX)/2)*view.s;
+  view.y=-((minY+maxY)/2)*view.s + 6;
+  applyView();
+}
+// 平移
+let drag=null;
+canvas.addEventListener("mousedown",e=>{ if(e.target.closest(".node"))return; drag={x:e.clientX,y:e.clientY,vx:view.x,vy:view.y}; canvas.classList.add("grabbing"); hideActionbar(); deselect(); });
+addEventListener("mousemove",e=>{ if(!drag)return; view.x=drag.vx+(e.clientX-drag.x); view.y=drag.vy+(e.clientY-drag.y); applyView(); });
+addEventListener("mouseup",()=>{ drag=null; canvas.classList.remove("grabbing"); });
+// 缩放
+canvas.addEventListener("wheel",e=>{ e.preventDefault();
+  const rect=canvas.getBoundingClientRect();
+  const cx=e.clientX-rect.left-rect.width/2, cy=e.clientY-rect.top-rect.height/2;
+  const old=view.s; const ns=Math.min(2.2,Math.max(.35, old*(e.deltaY<0?1.1:0.9)));
+  view.x=cx-(cx-view.x)*(ns/old); view.y=cy-(cy-view.y)*(ns/old); view.s=ns; applyView();
+},{passive:false});
+document.getElementById("zin").onclick=()=>{view.s=Math.min(2.2,view.s*1.15);applyView();};
+document.getElementById("zout").onclick=()=>{view.s=Math.max(.35,view.s*0.87);applyView();};
+document.getElementById("zfit").onclick=fit;
+
+/* =========================================================
+   节点选中 + 操作条
+   ========================================================= */
+const actionbar=document.getElementById("actionbar");
+let selected=null;
+function selectNode(n,el){
+  deselect(); selected=n; el.classList.add("sel"); positionActionbar(); actionbar.classList.add("show"); updateDockCtx();
+}
+function deselect(){ if(selected&&nodeEls[selected.id])nodeEls[selected.id].classList.remove("sel"); selected=null; hideActionbar(); updateDockCtx(); }
+
+/* 底部输入的目标节点提示条 */
+function updateDockCtx(){
+  const ctx=document.getElementById("dockCtx");
+  const inp=document.getElementById("dockInput");
+  if(selected && !selected.isRoot){
+    ctx.innerHTML=`针对 <b>${escapeHtml(selected.text)}</b> 追问或补充 <span class="x">✕</span>`;
+    ctx.classList.add("show");
+    inp.placeholder="输入针对该节点的追问或补充，AI 自动判断…";
+    ctx.querySelector(".x").onclick=e=>{ e.stopPropagation(); deselect(); };
+  }else if(selected && selected.isRoot){
+    ctx.innerHTML=`针对中心主题 <b>${escapeHtml(selected.text)}</b> 补充分支 <span class="x">✕</span>`;
+    ctx.classList.add("show");
+    inp.placeholder="输入要补充的分支或追问，AI 自动判断…";
+    ctx.querySelector(".x").onclick=e=>{ e.stopPropagation(); deselect(); };
+  }else{
+    ctx.classList.remove("show");
+    inp.placeholder="继续追加分支，或换个角度理清…";
+  }
+}
+
+/* 轻提示 */
+let toastTimer=null;
+function flashHint(msg){
+  const t=document.getElementById("toast"); t.textContent=msg; t.classList.add("show");
+  clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.classList.remove("show"),2200);
+}
+function hideActionbar(){ actionbar.classList.remove("show"); }
+function positionActionbar(){
+  if(!selected||!nodeEls[selected.id]){return;}
+  const rect=canvas.getBoundingClientRect();
+  const sx=rect.left+rect.width/2+view.x+selected._x*view.s;
+  const sy=rect.top+rect.height/2+view.y+selected._y*view.s;
+  actionbar.style.left=sx+"px";
+  actionbar.style.top=(sy-30*view.s-14)+"px";
+}
+actionbar.addEventListener("click",e=>{
+  const act=e.target.closest("button")?.dataset.act; if(!act||!selected)return;
+  const n=selected;
+  if(act==="del"){ if(n.isRoot){alert("中心主题不能删除");return;} removeNode(state.root,n); deselect(); fullRender(); return; }
+  if(act==="add"){ const t=prompt("补充一条："); if(t&&t.trim()){ n.collapsed=false; n.children.push(node(t.trim())); fullRender(); } return; }
+  if(act==="dig"){ digDeeper(n); return; }
+  if(act==="ask"){ askQuestion(n); return; }
+});
+function removeNode(parent,target){
+  const i=parent.children.indexOf(target);
+  if(i>-1){parent.children.splice(i,1);return true;}
+  return parent.children.some(c=>removeNode(c,target));
+}
+
+/* 深挖：AI 拆出更细的子节点（假数据） */
+const DIG_POOL=[
+  t=>`「${short(t)}」具体表现在哪`,
+  t=>`背后的关键因素`,
+  t=>`可能被忽略的一面`,
+  t=>`如果成立，会怎样`,
+  t=>`下一步可以做什么`,
+];
+function digDeeper(n){
+  showMiniLoading(n,()=>{
+    n.collapsed=false;
+    const k=2+Math.floor(Math.random()*2);
+    for(let i=0;i<k;i++){ n.children.push(node(DIG_POOL[(n.id+i)%DIG_POOL.length](n.text))); }
+    fullRender();
+    setTimeout(()=>{ if(selected===n) positionActionbar(); },50);
+  });
+}
+/* 追问：AI 反问一个促进思考的问题 */
+const ASK_POOL=[
+  "这一点，你最在意的是什么？",
+  "有没有反例能推翻它？",
+  "如果只能保留一条，你会留哪条？",
+  "它和你的最终目标有多大关系？",
+  "最坏情况发生时，你能接受吗？",
+];
+function askQuestion(n){
+  showMiniLoading(n,()=>{
+    n.collapsed=false;
+    const q=node(ASK_POOL[n.id%ASK_POOL.length]); q.isQ=true;
+    n.children.push(q); fullRender();
+    setTimeout(()=>{ if(selected===n) positionActionbar(); },50);
+  });
+}
+function short(t){ return t.length>6? t.slice(0,6)+"…" : t; }
+function showMiniLoading(n,done){ hideActionbar(); setTimeout(done,420); }
+
+/* =========================================================
+   类型切换菜单
+   ========================================================= */
+const typeMenu=document.getElementById("typeMenu");
+const typeTag=document.getElementById("typeTag");
+function renderTypeMenu(){
+  typeMenu.innerHTML="";
+  Object.entries(TYPES).forEach(([k,v])=>{
+    const d=document.createElement("div"); d.textContent=v.name; if(k===state.type)d.classList.add("on");
+    d.onclick=(e)=>{ e.stopPropagation(); typeMenu.classList.remove("open");
+      if(k!==state.type){ regenerate(k); } };
+    typeMenu.appendChild(d);
+  });
+}
+typeTag.addEventListener("click",e=>{ e.stopPropagation(); renderTypeMenu(); typeMenu.classList.toggle("open"); });
+addEventListener("click",()=>typeMenu.classList.remove("open"));
+
+/* =========================================================
+   生成主流程
+   ========================================================= */
+const hero=document.getElementById("hero");
+const topbar=document.getElementById("topbar");
+const dock=document.getElementById("dock");
+const zoomctl=document.getElementById("zoomctl");
+const loading=document.getElementById("loading");
+
+function generate(text){
+  if(!text.trim())return;
+  hero.classList.add("gone");
+  loading.classList.add("show");
+  setTimeout(()=>{
+    const {root,type}=buildTree(text.trim());
+    state.root=root; state.type=type; state.topic=text.trim();
+    prevIds=new Set();
+    document.getElementById("typeName").textContent=TYPES[type].name;
+    document.getElementById("topicText").textContent="“"+text.trim()+"”";
+    topbar.classList.remove("hidden"); dock.classList.add("show"); zoomctl.classList.add("show");
+    loading.classList.remove("show");
+    fullRender(true); fit();
+  },650);
+}
+function regenerate(forceType){
+  if(!state.topic)return;
+  loading.classList.add("show"); deselect();
+  setTimeout(()=>{
+    const {root,type}=buildTree(state.topic, forceType||null);
+    state.root=root; state.type=type; prevIds=new Set();
+    document.getElementById("typeName").textContent=TYPES[type].name;
+    loading.classList.remove("show"); fullRender(true); fit();
+  },500);
+}
+
+// 底部追加：作为新的一级分支挂到主题下
+function appendBranch(text){
+  if(!text.trim()||!state.root)return;
+  const b=node(text.trim()); state.root.children.push(b); fullRender(); fit();
+}
+
+// 底部输入提交：选中节点则针对它，由 AI 判断追问 / 补充
+function dockSubmit(text){
+  text=text.trim(); if(!text) return;
+  if(selected){ targetNodeMessage(selected, text); }
+  else{ appendBranch(text); }
+}
+// AI 判断这条消息是「追问」还是「补充」
+function isQuestionMsg(text){
+  if(/[?？]\s*$/.test(text)) return true;
+  return /(吗|呢|为什么|为啥|怎么|如何|是不是|能不能|有没有|是否|该不该|要不要|多少|哪些|哪个|什么|可不可以)/.test(text);
+}
+function targetNodeMessage(n, text){
+  n.collapsed=false;
+  if(isQuestionMsg(text)){
+    const q=node(text); q.isAsk=true;
+    const a=node(aiAnswer(text, n.text)); a.isAns=true;
+    q.children.push(a); n.children.push(q);
+    flashHint("AI 判断为「追问」，已生成回答");
+  }else{
+    n.children.push(node(text));
+    flashHint("AI 判断为「补充」，已添加到该节点");
+  }
+  fullRender();
+  setTimeout(()=>{ if(selected===n) positionActionbar(); },60);
+}
+// 假数据：模拟 AI 对追问的回答
+const ANS_POOL=[
+  (q,c)=>`就「${short(c)}」而言，关键是先分清主次，再逐条权衡`,
+  (q,c)=>`可以从短期影响和长期影响两个维度来看`,
+  (q,c)=>`取决于你的目标——先明确目标，答案会更清晰`,
+  (q,c)=>`通常有 2~3 种情况，建议各列出再对比`,
+  (q,c)=>`先找出最关键的那个变量，其余往往随之而定`,
+];
+function aiAnswer(q, ctx){ return ANS_POOL[Math.floor(Math.random()*ANS_POOL.length)](q,ctx); }
+
+/* =========================================================
+   导出：PlantUML mindmap + 图片
+   ========================================================= */
+function toPlantUML(){
+  if(!state.root) return "";
+  const lines=["@startmindmap"];
+  (function walk(n,depth){
+    lines.push("*".repeat(depth)+" "+n.text.replace(/\n/g," "));
+    n.children.forEach(c=>walk(c,depth+1));
+  })(state.root,1);
+  lines.push("@endmindmap");
+  return lines.join("\n");
+}
+function copyPlantUML(){
+  const code=toPlantUML(); if(!code) return;
+  const done=()=>flashHint("已复制 PlantUML 代码");
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(code).then(done).catch(()=>fallbackCopy(code,done));
+  }else fallbackCopy(code,done);
+}
+function fallbackCopy(text,done){
+  const ta=document.createElement("textarea"); ta.value=text; ta.style.position="fixed"; ta.style.opacity="0";
+  document.body.appendChild(ta); ta.select();
+  try{ document.execCommand("copy"); done(); }catch(e){ alert("复制失败，请手动复制：\n\n"+text); }
+  document.body.removeChild(ta);
+}
+
+function roundRect(ctx,x,y,w,h,r){
+  r=Math.min(r,w/2,h/2);
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+}
+function exportImage(){
+  if(!state.root) return;
+  const nodes=allNodes(state.root);
+  let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
+  const FONT='-apple-system,"PingFang SC","Microsoft YaHei",sans-serif';
+  const metas=nodes.map(n=>{
+    const card=nodeEls[n.id].querySelector(".card");
+    const r=card.getBoundingClientRect();
+    const w=r.width/view.s, h=r.height/view.s;
+    const x=n._x-w/2, y=n._y-h/2;
+    const cs=getComputedStyle(card);
+    minX=Math.min(minX,x);minY=Math.min(minY,y);maxX=Math.max(maxX,x+w);maxY=Math.max(maxY,y+h);
+    return {n,x,y,w,h,bg:cs.backgroundColor,border:cs.borderTopColor,color:cs.color,
+            wt:(cs.fontWeight==="bold"||parseInt(cs.fontWeight)>=600)?"600":"400",
+            fs:parseFloat(cs.fontSize)};
+  });
+  const pad=44, scale=2;
+  const W=maxX-minX+pad*2, H=maxY-minY+pad*2;
+  const cv=document.createElement("canvas"); cv.width=Math.round(W*scale); cv.height=Math.round(H*scale);
+  const ctx=cv.getContext("2d"); ctx.scale(scale,scale); ctx.translate(-minX+pad,-minY+pad);
+  // 背景
+  ctx.fillStyle="#fff"; ctx.fillRect(minX-pad,minY-pad,W,H);
+  // 连线
+  ctx.strokeStyle="#c9cbd1"; ctx.lineWidth=1.5;
+  nodes.forEach(n=>{ if(n.collapsed)return; n.children.forEach(c=>{
+    const mx=(n._x+c._x)/2;
+    ctx.beginPath(); ctx.moveTo(n._x,n._y); ctx.bezierCurveTo(mx,n._y,mx,c._y,c._x,c._y); ctx.stroke();
+  });});
+  // 节点
+  metas.forEach(m=>{
+    roundRect(ctx,m.x,m.y,m.w,m.h,m.n.isRoot?14:12);
+    ctx.fillStyle=m.bg; ctx.fill(); ctx.strokeStyle=m.border; ctx.lineWidth=1; ctx.stroke();
+    const padX=m.n.isRoot?18:13;
+    const label=m.n.isQ?"AI 追问":m.n.isAsk?"你问":m.n.isAns?"AI 答":"";
+    ctx.textAlign="left"; ctx.textBaseline="middle";
+    if(label){
+      ctx.globalAlpha=.65; ctx.fillStyle=m.color; ctx.font=`10px ${FONT}`;
+      ctx.fillText(label,m.x+padX,m.y+m.h*0.33); ctx.globalAlpha=1;
+      ctx.fillStyle=m.color; ctx.font=`${m.wt} ${m.fs}px ${FONT}`;
+      ctx.fillText(m.n.text,m.x+padX,m.y+m.h*0.68);
+    }else{
+      ctx.fillStyle=m.color; ctx.font=`${m.wt} ${m.fs}px ${FONT}`;
+      ctx.fillText(m.n.text,m.x+padX,m.y+m.h/2);
+    }
+  });
+  const a=document.createElement("a"); a.download="理清-脑图.png"; a.href=cv.toDataURL("image/png"); a.click();
+  flashHint("已导出图片");
+}
+
+/* 绑定输入 */
+document.getElementById("heroSend").onclick=()=>generate(document.getElementById("heroInput").value);
+document.getElementById("heroInput").addEventListener("keydown",e=>{if(e.key==="Enter")generate(e.target.value);});
+document.getElementById("dockSend").onclick=()=>{const i=document.getElementById("dockInput");dockSubmit(i.value);i.value="";};
+document.getElementById("dockInput").addEventListener("keydown",e=>{if(e.key==="Enter"){dockSubmit(e.target.value);e.target.value="";}});
+document.getElementById("dockInput").addEventListener("focus",()=>{ hideActionbar(); });
+document.getElementById("regenBtn").onclick=()=>regenerate();
+document.getElementById("newBtn").onclick=()=>location.reload();
+document.getElementById("exportBtn").onclick=exportImage;
+document.getElementById("umlBtn").onclick=copyPlantUML;
+
+/* 示例 chips */
+const EXAMPLES=[
+  ["决策","我要不要离职"],
+  ["找根因","项目为什么总是延期"],
+  ["搞懂概念","什么是期权"],
+  ["做规划","策划一场新品发布会"],
+];
+const chipsBox=document.getElementById("chips");
+EXAMPLES.forEach(([tag,q])=>{
+  const c=document.createElement("div"); c.className="chip"; c.innerHTML=`<b>${tag}</b>${q}`;
+  c.onclick=()=>generate(q); chipsBox.appendChild(c);
+});
+
+addEventListener("resize",()=>{ applyView(); });
+</script>
+</body>
+</html>
