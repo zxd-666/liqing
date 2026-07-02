@@ -1,6 +1,7 @@
 import type { Mindmap, MindmapType } from "../src/lib/types.js";
 import { TYPE_HINTS, TYPE_LABELS } from "../src/lib/types.js";
 import { normalizeChildren, normalizeMindmap, normalizeRespond } from "./schema.js";
+import { formatSearchContext, searchWeb } from "./search.js";
 
 type ChatMessage = {
   role: "system" | "user";
@@ -8,6 +9,7 @@ type ChatMessage = {
 };
 
 const API_URL = "https://api.deepseek.com/chat/completions";
+const DEEPSEEK_TIMEOUT_MS = 45_000;
 
 function getApiKey() {
   return process.env.DEEPSEEK_API_KEY?.trim();
@@ -29,9 +31,9 @@ export function assertDeepSeekConfigured() {
   }
 }
 
-async function callDeepSeekJson(model: string, messages: ChatMessage[]) {
+async function callDeepSeekJson(model: string, messages: ChatMessage[], signal?: AbortSignal) {
   assertDeepSeekConfigured();
-  const res = await fetch(API_URL, {
+  const res = await fetchWithTimeout(API_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -43,7 +45,7 @@ async function callDeepSeekJson(model: string, messages: ChatMessage[]) {
       response_format: { type: "json_object" },
       temperature: 0.4
     })
-  });
+  }, signal, DEEPSEEK_TIMEOUT_MS, "AI 请求超时，请稍后重试");
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -58,17 +60,52 @@ async function callDeepSeekJson(model: string, messages: ChatMessage[]) {
   return JSON.parse(content);
 }
 
-async function callWithRetry<T>(model: string, messages: ChatMessage[], parser: (raw: unknown) => T) {
+async function callWithRetry<T>(model: string, messages: ChatMessage[], parser: (raw: unknown) => T, signal?: AbortSignal) {
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const raw = await callDeepSeekJson(model, messages);
+      const raw = await callDeepSeekJson(model, messages, signal);
       return parser(raw);
     } catch (err) {
+      if (isAbortError(err)) throw err;
       lastError = err;
     }
   }
   throw lastError instanceof Error ? lastError : new Error("DeepSeek 输出解析失败");
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  parentSignal: AbortSignal | undefined,
+  timeoutMs: number,
+  timeoutMessage: string
+) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeout = windowlessSetTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  const abort = () => controller.abort();
+  parentSignal?.addEventListener("abort", abort, { once: true });
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (timedOut) throw new Error(timeoutMessage);
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+    parentSignal?.removeEventListener("abort", abort);
+  }
+}
+
+function windowlessSetTimeout(callback: () => void, timeoutMs: number) {
+  return setTimeout(callback, timeoutMs);
 }
 
 const baseSystemPrompt = [
@@ -80,10 +117,18 @@ const baseSystemPrompt = [
   "初始脑图应尽量完整，而不是只给大纲；后续人工与 AI 是在完整图上继续优化。"
 ].join("\n");
 
-export async function generateMindmap(text: string, forcedType?: MindmapType): Promise<Mindmap> {
+export async function generateMindmap(input: {
+  text: string;
+  forcedType?: MindmapType;
+  webSearch?: boolean;
+  signal?: AbortSignal;
+}): Promise<Mindmap> {
+  assertDeepSeekConfigured();
+  const { text, forcedType, webSearch, signal } = input;
   const typeInstruction = forcedType
     ? `用户已手动指定类型为 ${TYPE_LABELS[forcedType]}，必须返回 type="${forcedType}"。`
     : "请自动判断 type，只能是 decision、cause、concept、plan 之一。";
+  const searchContext = webSearch ? formatSearchContext(await searchWeb(text, signal)) : "";
 
   return callWithRetry(generateModel(), [
     { role: "system", content: baseSystemPrompt },
@@ -97,17 +142,22 @@ export async function generateMindmap(text: string, forcedType?: MindmapType): P
         "交互预期：用户后续会和 AI 一起优化调整，但初始图应已经能独立帮助用户看清问题。",
         "控制规模：总节点建议 24 到 48 个；不要为了凑数量重复表达。",
         "返回格式：{\"type\":\"decision|cause|concept|plan\",\"root\":{\"text\":\"中心主题\",\"kind\":\"topic\",\"children\":[...]}}",
+        webSearch
+          ? "联网搜索已开启。必须优先参考下方搜索结果；搜索结果没有明确支持的信息，不要当作事实写入。涉及政策、价格、时间、产品能力等变化信息时，用“需核验”“待确认”等短节点表达不确定性。"
+          : "联网搜索未开启。不要声称已查询最新资料。",
+        searchContext ? `搜索上下文：\n${searchContext}` : "",
         `四类参考骨架：${JSON.stringify(TYPE_HINTS, null, 2)}`,
         `用户输入：${text}`
       ].join("\n")
     }
-  ], (raw) => normalizeMindmap(raw, forcedType));
+  ], (raw) => normalizeMindmap(raw, forcedType), signal);
 }
 
 export async function expandMindmapNode(input: {
   mindmap: Mindmap;
   targetPath: string[];
   mode: "dig" | "ask";
+  signal?: AbortSignal;
 }) {
   const modeText =
     input.mode === "dig"
@@ -126,13 +176,14 @@ export async function expandMindmapNode(input: {
         `当前脑图：${JSON.stringify(input.mindmap)}`
       ].join("\n")
     }
-  ], normalizeChildren);
+  ], normalizeChildren, input.signal);
 }
 
 export async function respondToNode(input: {
   mindmap: Mindmap;
   targetPath: string[];
   message: string;
+  signal?: AbortSignal;
 }) {
   return callWithRetry(lightModel(), [
     { role: "system", content: baseSystemPrompt },
@@ -149,5 +200,5 @@ export async function respondToNode(input: {
         `当前脑图：${JSON.stringify(input.mindmap)}`
       ].join("\n")
     }
-  ], normalizeRespond);
+  ], normalizeRespond, input.signal);
 }

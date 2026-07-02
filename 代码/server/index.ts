@@ -1,4 +1,5 @@
 import express from "express";
+import type { Request, Response } from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
@@ -17,7 +18,8 @@ app.use(express.json({ limit: "1mb" }));
 
 const generateBodySchema = z.object({
   text: z.string().min(1),
-  forcedType: mindmapTypeSchema.optional()
+  forcedType: mindmapTypeSchema.optional(),
+  webSearch: z.boolean().optional()
 });
 
 const expandBodySchema = z.object({
@@ -45,38 +47,65 @@ function toHttpError(err: unknown) {
   return { status: 500, message: "服务异常，请稍后再试" };
 }
 
+function requestAbortSignal(req: Request, res: Response) {
+  const controller = new AbortController();
+  req.on("aborted", () => {
+    if (!res.writableEnded) controller.abort();
+  });
+  return controller.signal;
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof Error && error.name === "AbortError";
+}
+
 app.post("/api/generate", async (req, res) => {
+  const signal = requestAbortSignal(req, res);
   try {
     const body = generateBodySchema.parse(req.body);
-    res.json(await generateMindmap(body.text.trim(), body.forcedType));
+    const mindmap = await generateMindmap({
+      text: body.text.trim(),
+      forcedType: body.forcedType,
+      webSearch: body.webSearch,
+      signal
+    });
+    if (!signal.aborted) res.json(mindmap);
   } catch (err) {
+    if (isAbortError(err)) return;
     const http = toHttpError(err);
     res.status(http.status).json({ error: http.message });
   }
 });
 
 app.post("/api/expand", async (req, res) => {
+  const signal = requestAbortSignal(req, res);
   try {
     const body = expandBodySchema.parse(req.body);
     const children = await expandMindmapNode({
       ...body,
-      mindmap: normalizeMindmap(body.mindmap)
+      mindmap: normalizeMindmap(body.mindmap),
+      signal
     });
-    res.json({ children });
+    if (!signal.aborted) res.json({ children });
   } catch (err) {
+    if (isAbortError(err)) return;
     const http = toHttpError(err);
     res.status(http.status).json({ error: http.message });
   }
 });
 
 app.post("/api/respond", async (req, res) => {
+  const signal = requestAbortSignal(req, res);
   try {
     const body = respondBodySchema.parse(req.body);
-    res.json(await respondToNode({
+    const result = await respondToNode({
       ...body,
-      mindmap: normalizeMindmap(body.mindmap)
-    }));
+      mindmap: normalizeMindmap(body.mindmap),
+      signal
+    });
+    if (!signal.aborted) res.json(result);
   } catch (err) {
+    if (isAbortError(err)) return;
     const http = toHttpError(err);
     res.status(http.status).json({ error: http.message });
   }

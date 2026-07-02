@@ -9,19 +9,23 @@ import { createNode, findNode, pathToNode, removeNode, updateNode, visibleNodes,
 
 type ViewState = { x: number; y: number; s: number };
 type Toast = { id: number; text: string };
+type SelectionBox = { startX: number; startY: number; currentX: number; currentY: number };
 
 const mindmapTypes: MindmapType[] = ["decision", "cause", "concept", "plan"];
+const DEFAULT_ROOT_OFFSET_X = -600;
 
 export default function App() {
   const [mindmap, setMindmap] = useState<Mindmap | null>(null);
   const [topic, setTopic] = useState("");
   const [heroText, setHeroText] = useState("");
   const [heroType, setHeroType] = useState<MindmapType | null>(null);
+  const [webSearchEnabled, setWebSearchEnabled] = useState(false);
   const [dockText, setDockText] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [multiSelectedIds, setMultiSelectedIds] = useState<Set<string>>(new Set());
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
   const [view, setView] = useState<ViewState>({ x: 0, y: 0, s: 1 });
-  const [drag, setDrag] = useState<null | { x: number; y: number; vx: number; vy: number }>(null);
+  const [selectionBox, setSelectionBox] = useState<SelectionBox | null>(null);
   const [loadingText, setLoadingText] = useState("");
   const [toast, setToast] = useState<Toast | null>(null);
   const [typeMenuOpen, setTypeMenuOpen] = useState(false);
@@ -31,20 +35,30 @@ export default function App() {
   const [chatEntries, setChatEntries] = useState<ChatEntry[]>([]);
   const [records, setRecords] = useState<MindmapRecord[]>(() => loadRecords());
   const [recordsOpen, setRecordsOpen] = useState(false);
+  const [deleteConfirmRecord, setDeleteConfirmRecord] = useState<MindmapRecord | null>(null);
   const [activeRecordId, setActiveRecordId] = useState<string | null>(null);
+  const [isViewAnimating, setIsViewAnimating] = useState(false);
+  const [focusMode, setFocusMode] = useState(false);
 
   const canvasRef = useRef<HTMLDivElement | null>(null);
+  const worldRef = useRef<HTMLDivElement | null>(null);
   const nodeRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const dockInputRef = useRef<HTMLTextAreaElement | null>(null);
   const chatListRef = useRef<HTMLDivElement | null>(null);
   const selectEditTextRef = useRef<string | null>(null);
   const shouldFitOnMindmapChangeRef = useRef(false);
+  const activeRequestRef = useRef<AbortController | null>(null);
+  const viewRef = useRef<ViewState>({ x: 0, y: 0, s: 1 });
+  const pendingFocusNodeRef = useRef<string | null>(null);
+  const suppressCanvasClickRef = useRef(false);
+  const selectionBoxRef = useRef<SelectionBox | null>(null);
 
   const root = mindmap?.root ?? null;
   const layout = useMemo(() => (root ? layoutMindmap(root, collapsedIds) : null), [root, collapsedIds]);
   const nodes = useMemo(() => (root ? visibleNodes(root, collapsedIds) : []), [root, collapsedIds]);
   const selected = root && selectedId ? findNode(root, selectedId) : null;
   const selectedLayout = selectedId ? layout?.nodes.get(selectedId) : null;
+  const multiSelectedCount = multiSelectedIds.size;
 
   const flash = useCallback((text: string) => {
     const id = Date.now();
@@ -58,6 +72,33 @@ export default function App() {
     setChatEntries((current) => [...current, { ...entry, id: crypto.randomUUID() }]);
   }, []);
 
+  const applyView = useCallback((next: ViewState, commit = true) => {
+    viewRef.current = next;
+    if (worldRef.current) {
+      worldRef.current.style.transform = viewTransform(next);
+    }
+    if (commit) setView(next);
+  }, []);
+
+  const animateViewTo = useCallback((next: ViewState) => {
+    setIsViewAnimating(true);
+    applyView(next);
+    window.setTimeout(() => setIsViewAnimating(false), 320);
+  }, [applyView]);
+
+  const cancelAiRequest = useCallback(() => {
+    if (!activeRequestRef.current) return;
+    activeRequestRef.current.abort();
+    activeRequestRef.current = null;
+    addChat({
+      role: "system",
+      title: "已取消",
+      text: loadingText ? `已停止「${loadingText}」。` : "已停止当前 AI 请求。"
+    });
+    setLoadingText("");
+    flash("已取消");
+  }, [addChat, flash, loadingText]);
+
   useEffect(() => {
     chatListRef.current?.scrollTo({ top: chatListRef.current.scrollHeight, behavior: "smooth" });
   }, [chatEntries, loadingText]);
@@ -70,6 +111,7 @@ export default function App() {
       saveActiveRecordId(null);
       return;
     }
+    shouldFitOnMindmapChangeRef.current = true;
     setActiveRecordId(record.id);
     setMindmap(record.mindmap);
     setTopic(record.topic);
@@ -77,9 +119,11 @@ export default function App() {
     setHeroType(record.type);
     setChatEntries(record.chatEntries ?? []);
     setSelectedId(null);
+    setMultiSelectedIds(new Set());
     setCollapsedIds(new Set());
     setView({ x: 0, y: 0, s: 1 });
     setFocusedAddTarget(null);
+    setFocusMode(true);
   }, []);
 
   useEffect(() => {
@@ -113,37 +157,50 @@ export default function App() {
     setMindmap(next);
     setTopic(nextTopic);
     setSelectedId(null);
+    setMultiSelectedIds(new Set());
     setCollapsedIds(new Set());
+    setFocusMode(true);
   }, [activeRecordId]);
 
   const runGenerate = useCallback(
     async (text: string, forcedType?: MindmapType) => {
       const trimmed = text.trim();
       if (!trimmed) return;
-      setLoadingText(forcedType ? "AI 理清中" : "正在理清…");
+      if (activeRequestRef.current) {
+        flash("AI 正在处理，先取消当前任务");
+        return;
+      }
+      const controller = new AbortController();
+      activeRequestRef.current = controller;
+      setLoadingText(webSearchEnabled ? "联网搜索中…" : forcedType ? "AI 理清中" : "正在理清…");
       addChat({
         role: "user",
-        text: forcedType ? `按「${TYPE_LABELS[forcedType]}」重新理清：${trimmed}` : trimmed
+        text: [
+          forcedType ? `按「${TYPE_LABELS[forcedType]}」重新理清：${trimmed}` : trimmed,
+          webSearchEnabled ? "已开启联网搜索" : ""
+        ].filter(Boolean).join("\n")
       });
       addChat({
         role: "thinking",
-        title: forcedType ? "AI 重新整理中" : "AI 正在理清",
-        text: "我会先判断问题类型，再拆出一张可俯瞰的脑图。",
+        title: webSearchEnabled ? "AI 联网整理中" : forcedType ? "AI 重新整理中" : "AI 正在理清",
+        text: webSearchEnabled ? "我会先联网搜索，再把可参考的信息整理进脑图。" : "我会先判断问题类型，再拆出一张可俯瞰的脑图。",
         steps: [
+          webSearchEnabled ? "联网搜索相关资料" : "",
           forcedType ? `采用你指定的类型：${TYPE_LABELS[forcedType]}` : "判断属于决策 / 找根因 / 概念 / 规划中的哪一类",
           "提取中心主题和一级结构",
           "补齐关键分支，控制节点为短句"
-        ]
+        ].filter(Boolean)
       });
       try {
-        const next = await generateMindmap(trimmed, forcedType);
+        const next = await generateMindmap(trimmed, forcedType, webSearchEnabled, controller.signal);
         applyMindmap(next, trimmed);
         addChat({
           role: "ai",
           title: `已生成「${TYPE_LABELS[next.type]}」脑图`,
-          text: `我已把「${trimmed}」整理成 ${next.root.children.length} 个主分支。你可以点右侧任意节点深挖、追问或补充。`
+          text: `我已${webSearchEnabled ? "结合搜索结果" : ""}把「${trimmed}」整理成 ${next.root.children.length} 个主分支。你可以点右侧任意节点深挖、追问或补充。`
         });
       } catch (err) {
+        if (isAbortError(err)) return;
         flash(err instanceof Error ? err.message : "生成失败，请稍后再试");
         addChat({
           role: "system",
@@ -151,10 +208,11 @@ export default function App() {
           text: err instanceof Error ? err.message : "生成失败，请稍后再试"
         });
       } finally {
+        if (activeRequestRef.current === controller) activeRequestRef.current = null;
         setLoadingText("");
       }
     },
-    [addChat, applyMindmap, flash]
+    [addChat, applyMindmap, flash, webSearchEnabled]
   );
 
   const regenerate = useCallback(
@@ -185,30 +243,21 @@ export default function App() {
 
   const fit = useCallback(() => {
     if (!layout || nodes.length === 0) return;
-    let minX = Infinity;
-    let maxX = -Infinity;
     let minY = Infinity;
     let maxY = -Infinity;
     nodes.forEach((node) => {
       const point = layout.nodes.get(node.id);
       if (!point) return;
-      minX = Math.min(minX, point.x - 120);
-      maxX = Math.max(maxX, point.x + 140);
       minY = Math.min(minY, point.y - 42);
       maxY = Math.max(maxY, point.y + 42);
     });
-    const width = Math.max(1, maxX - minX);
-    const height = Math.max(1, maxY - minY);
-    const rect = canvasRef.current?.getBoundingClientRect();
-    const availableWidth = rect?.width ?? window.innerWidth;
-    const availableHeight = rect?.height ?? window.innerHeight;
-    const scale = Math.min(1, Math.min((availableWidth - 120) / width, (availableHeight - 160) / height));
-    setView({
-      s: Math.max(0.4, scale),
-      x: -((minX + maxX) / 2) * Math.max(0.4, scale),
-      y: -((minY + maxY) / 2) * Math.max(0.4, scale) + 6
+    const scale = 1;
+    animateViewTo({
+      s: scale,
+      x: DEFAULT_ROOT_OFFSET_X,
+      y: -((minY + maxY) / 2) * scale + 6
     });
-  }, [layout, nodes]);
+  }, [animateViewTo, layout, nodes]);
 
   useEffect(() => {
     if (!mindmap || !shouldFitOnMindmapChangeRef.current) return;
@@ -217,22 +266,80 @@ export default function App() {
   }, [mindmap]);
 
   useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
+
+  const focusNodeInView = useCallback((nodeId: string) => {
+    const point = layout?.nodes.get(nodeId);
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!point || !rect) return;
+    const scale = viewRef.current.s;
+    animateViewTo({
+      s: scale,
+      x: rect.width * 0.12 - point.x * scale,
+      y: -point.y * scale
+    });
+  }, [animateViewTo, layout]);
+
+  const idsInSelectionBox = useCallback((box: SelectionBox) => {
+    const left = Math.min(box.startX, box.currentX);
+    const right = Math.max(box.startX, box.currentX);
+    const top = Math.min(box.startY, box.currentY);
+    const bottom = Math.max(box.startY, box.currentY);
+    const next = new Set<string>();
+    nodes.forEach((node) => {
+      if (node.kind === "topic") return;
+      const el = nodeRefs.current[node.id];
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      if (rect.right >= left && rect.left <= right && rect.bottom >= top && rect.top <= bottom) {
+        next.add(node.id);
+      }
+    });
+    return next;
+  }, [nodes]);
+
+  useEffect(() => {
+    const nodeId = pendingFocusNodeRef.current;
+    if (!nodeId || !layout?.nodes.has(nodeId)) return;
+    pendingFocusNodeRef.current = null;
+    requestAnimationFrame(() => focusNodeInView(nodeId));
+  }, [focusNodeInView, layout]);
+
+  useEffect(() => {
     const onMove = (event: MouseEvent) => {
-      if (!drag) return;
-      setView((current) => ({
-        ...current,
-        x: drag.vx + event.clientX - drag.x,
-        y: drag.vy + event.clientY - drag.y
-      }));
+      if (!selectionBox) return;
+      const currentBox = selectionBoxRef.current ?? selectionBox;
+      const nextBox = { ...currentBox, currentX: event.clientX, currentY: event.clientY };
+      selectionBoxRef.current = nextBox;
+      setSelectionBox(nextBox);
+      const nextIds = idsInSelectionBox(nextBox);
+      setMultiSelectedIds(nextIds);
+      setSelectedId(null);
     };
-    const onUp = () => setDrag(null);
+    const onUp = () => {
+      if (!selectionBox) return;
+      const finalBox = selectionBoxRef.current ?? selectionBox;
+      const distance = Math.hypot(finalBox.currentX - finalBox.startX, finalBox.currentY - finalBox.startY);
+      const nextIds = distance < 4 ? new Set<string>() : idsInSelectionBox(finalBox);
+      if (nextIds.size === 1) {
+        setSelectedId([...nextIds][0]);
+        setMultiSelectedIds(new Set());
+      } else {
+        setMultiSelectedIds(nextIds);
+        setSelectedId(null);
+      }
+      suppressCanvasClickRef.current = true;
+      selectionBoxRef.current = null;
+      setSelectionBox(null);
+    };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
     return () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
-  }, [drag]);
+  }, [idsInSelectionBox, selectionBox]);
 
   const selectedScreen = useMemo(() => {
     if (!selectedLayout || !canvasRef.current) return null;
@@ -243,7 +350,21 @@ export default function App() {
     };
   }, [selectedLayout, view]);
 
+  const multiActionbarScreen = useMemo(() => {
+    if (multiSelectedIds.size < 2) return null;
+    const rects = [...multiSelectedIds]
+      .map((id) => nodeRefs.current[id]?.getBoundingClientRect())
+      .filter((rect): rect is DOMRect => Boolean(rect));
+    if (rects.length === 0) return null;
+    const left = Math.min(...rects.map((rect) => rect.left));
+    const right = Math.max(...rects.map((rect) => rect.right));
+    const top = Math.min(...rects.map((rect) => rect.top));
+    return { x: (left + right) / 2, y: top };
+  }, [multiSelectedIds, view]);
+
   function appendChildren(targetId: string, children: MindmapNode[]) {
+    const lastChild = children.at(-1);
+    if (lastChild) pendingFocusNodeRef.current = lastChild.id;
     setMindmap((current) => {
       if (!current) return current;
       return {
@@ -263,6 +384,12 @@ export default function App() {
 
   async function handleExpand(mode: "dig" | "ask") {
     if (!mindmap || !selected) return;
+    if (activeRequestRef.current) {
+      flash("AI 正在处理，先取消当前任务");
+      return;
+    }
+    const controller = new AbortController();
+    activeRequestRef.current = controller;
     setLoadingText(mode === "dig" ? "正在深挖…" : "正在追问…");
     addChat({
       role: "thinking",
@@ -276,7 +403,7 @@ export default function App() {
     });
     try {
       const targetPath = pathToNode(mindmap.root, selected.id);
-      const result = await expandNode(mindmap, targetPath, mode);
+      const result = await expandNode(mindmap, targetPath, mode, controller.signal);
       appendChildren(selected.id, result.children);
       addChat({
         role: "ai",
@@ -284,6 +411,7 @@ export default function App() {
         text: `我已在「${selected.text}」下新增 ${result.children.length} 个节点。`
       });
     } catch (err) {
+      if (isAbortError(err)) return;
       flash(err instanceof Error ? err.message : "操作失败，请稍后再试");
       addChat({
         role: "system",
@@ -291,6 +419,7 @@ export default function App() {
         text: err instanceof Error ? err.message : "操作失败，请稍后再试"
       });
     } finally {
+      if (activeRequestRef.current === controller) activeRequestRef.current = null;
       setLoadingText("");
     }
   }
@@ -327,11 +456,37 @@ export default function App() {
     setSelectedId(null);
   }, [addChat, flash, mindmap, selected]);
 
+  const deleteMultiSelected = useCallback(() => {
+    if (!mindmap || multiSelectedIds.size === 0) return;
+    let nextRoot = mindmap.root;
+    const labels: string[] = [];
+    multiSelectedIds.forEach((id) => {
+      const node = findNode(nextRoot, id);
+      if (!node || node.kind === "topic") return;
+      labels.push(node.text);
+      nextRoot = removeNode(nextRoot, id);
+    });
+    if (labels.length === 0) return;
+    setMindmap({ ...mindmap, root: nextRoot });
+    setMultiSelectedIds(new Set());
+    setSelectedId(null);
+    addChat({
+      role: "system",
+      title: "已批量删除节点",
+      text: `已从脑图中删除 ${labels.length} 个节点。`
+    });
+  }, [addChat, mindmap, multiSelectedIds]);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (!selected) return;
       const target = event.target as HTMLElement | null;
       if (target?.closest("input, textarea, select, [contenteditable='true']")) return;
+      if (multiSelectedIds.size > 0 && (event.key === "Delete" || event.key === "Backspace")) {
+        event.preventDefault();
+        deleteMultiSelected();
+        return;
+      }
+      if (!selected) return;
       if (event.key === "Tab") {
         event.preventDefault();
         addManualChild();
@@ -344,13 +499,17 @@ export default function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [addManualChild, deleteSelected, selected]);
+  }, [addManualChild, deleteMultiSelected, deleteSelected, multiSelectedIds, selected]);
 
   async function submitDockText() {
     const text = dockText.trim();
     if (!text || !mindmap) return;
-    setDockText("");
     const target = selected || (focusedAddTarget ? findNode(mindmap.root, focusedAddTarget) : null);
+    if (target && activeRequestRef.current) {
+      flash("AI 正在处理，先取消当前任务");
+      return;
+    }
+    setDockText("");
     addChat({
       role: "user",
       title: target ? `针对「${target.text}」` : "追加新分支",
@@ -366,6 +525,8 @@ export default function App() {
       });
       return;
     }
+    const controller = new AbortController();
+    activeRequestRef.current = controller;
     setLoadingText("AI 正在完善脑图…");
     addChat({
       role: "thinking",
@@ -380,7 +541,7 @@ export default function App() {
     });
     try {
       const targetPath = pathToNode(mindmap.root, target.id);
-      const result = await respondToNode(mindmap, targetPath, text);
+      const result = await respondToNode(mindmap, targetPath, text, controller.signal);
       appendChildren(target.id, result.nodes);
       flash("AI 已完善该节点");
       addChat({
@@ -389,6 +550,7 @@ export default function App() {
         text: `我已把内容整理成 ${result.nodes.length} 个子节点，追加到「${target.text}」下。`
       });
     } catch (err) {
+      if (isAbortError(err)) return;
       flash(err instanceof Error ? err.message : "提交失败，请稍后再试");
       addChat({
         role: "system",
@@ -396,6 +558,7 @@ export default function App() {
         text: err instanceof Error ? err.message : "提交失败，请稍后再试"
       });
     } finally {
+      if (activeRequestRef.current === controller) activeRequestRef.current = null;
       setLoadingText("");
       setFocusedAddTarget(null);
     }
@@ -503,6 +666,7 @@ export default function App() {
     setHeroType(null);
     setDockText("");
     setSelectedId(null);
+    setMultiSelectedIds(new Set());
     setCollapsedIds(new Set());
     setView({ x: 0, y: 0, s: 1 });
     setChatEntries([]);
@@ -519,10 +683,25 @@ export default function App() {
     setHeroType(record.type);
     setChatEntries(record.chatEntries ?? []);
     setSelectedId(null);
+    setMultiSelectedIds(new Set());
     setCollapsedIds(new Set());
     setView({ x: 0, y: 0, s: 1 });
     setFocusedAddTarget(null);
+    setFocusMode(true);
     setRecordsOpen(false);
+  }
+
+  function deleteRecord(record: MindmapRecord) {
+    setRecords((current) => {
+      const next = current.filter((item) => item.id !== record.id);
+      saveRecords(next);
+      return next;
+    });
+    if (record.id === activeRecordId) {
+      reset();
+    }
+    setDeleteConfirmRecord(null);
+    flash("记录已删除");
   }
 
   function collapseAllNodes() {
@@ -539,7 +718,7 @@ export default function App() {
   }
 
   const worldStyle = {
-    transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})`
+    transform: viewTransform(view)
   };
 
   return (
@@ -570,15 +749,26 @@ export default function App() {
             </div>
           </div>
         )}
+        <label className="search-switch search-switch-top">
+          <input
+            type="checkbox"
+            checked={webSearchEnabled}
+            onChange={(event) => setWebSearchEnabled(event.target.checked)}
+          />
+          <span>联网搜索</span>
+        </label>
         <div className="topic-text">{mindmap?.root.text ? `“${mindmap.root.text}”` : ""}</div>
         <div className="spacer" />
         <button className="tbtn" onClick={exportImage}>⬇ 导出图片</button>
         <button className="tbtn" onClick={copyPlantUML}>⧉ 复制 PlantUML</button>
-        <button className="tbtn" onClick={() => void regenerate()}>⟲ 重新生成</button>
+        <button className="tbtn" disabled={Boolean(loadingText)} onClick={() => void regenerate()}>⟲ 重新生成</button>
+        <button className="tbtn" onClick={() => setFocusMode((value) => !value)}>
+          {focusMode ? "展开记录" : "专注脑图"}
+        </button>
         <button className="tbtn" onClick={reset}>＋ 理清新事</button>
       </div>
 
-      {mindmap && (
+      {mindmap && !focusMode && (
         <aside className="chat-panel">
           <div className="chat-head">
             <div>
@@ -614,7 +804,12 @@ export default function App() {
           </div>
 
           <div className="selected-context">
-            {selected ? (
+            {multiSelectedCount > 1 ? (
+              <>
+                已选择 <b>{multiSelectedCount} 个节点</b>
+                <button onClick={() => setMultiSelectedIds(new Set())}>取消</button>
+              </>
+            ) : selected ? (
               <>
                 当前节点 <b>{selected.text}</b>
                 <button onClick={() => setSelectedId(null)}>取消</button>
@@ -628,7 +823,8 @@ export default function App() {
             <textarea
               ref={dockInputRef}
               value={dockText}
-              placeholder={selected ? "输入问题或补充，AI 会完善当前节点…" : "追加新分支，或换个角度继续理清…"}
+              disabled={multiSelectedCount > 1}
+              placeholder={multiSelectedCount > 1 ? "已多选节点，只能删除…" : selected ? "输入问题或补充，AI 会完善当前节点…" : "追加新分支，或换个角度继续理清…"}
               onChange={(event) => setDockText(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
@@ -637,36 +833,61 @@ export default function App() {
                 }
               }}
             />
-            <button className="send" disabled={!dockText.trim()} onClick={() => void submitDockText()}>↑</button>
+            <button className="send" disabled={multiSelectedCount > 1 || !dockText.trim()} onClick={() => void submitDockText()}>↑</button>
           </div>
         </aside>
       )}
 
       <div
         ref={canvasRef}
-        className={`canvas ${mindmap ? "canvas-with-panel" : ""} ${drag ? "grabbing" : ""}`}
-        onClick={() => setSelectedId(null)}
+        className={`canvas ${mindmap && !focusMode ? "canvas-with-panel" : ""} ${selectionBox ? "selecting" : ""}`}
+        onClick={() => {
+          if (suppressCanvasClickRef.current) {
+            suppressCanvasClickRef.current = false;
+            return;
+          }
+          setSelectedId(null);
+          setMultiSelectedIds(new Set());
+        }}
         onMouseDown={(event) => {
           if ((event.target as HTMLElement).closest(".node")) return;
+          if (event.button !== 0) return;
           setSelectedId(null);
-          setDrag({ x: event.clientX, y: event.clientY, vx: view.x, vy: view.y });
+          setMultiSelectedIds(new Set());
+          const nextBox = {
+            startX: event.clientX,
+            startY: event.clientY,
+            currentX: event.clientX,
+            currentY: event.clientY
+          };
+          selectionBoxRef.current = nextBox;
+          setSelectionBox(nextBox);
         }}
         onWheel={(event) => {
           event.preventDefault();
-          const rect = canvasRef.current?.getBoundingClientRect();
-          if (!rect) return;
-          const cx = event.clientX - rect.left - rect.width / 2;
-          const cy = event.clientY - rect.top - rect.height / 2;
-          const old = view.s;
-          const nextScale = Math.min(2.2, Math.max(0.35, old * (event.deltaY < 0 ? 1.1 : 0.9)));
-          setView({
-            s: nextScale,
-            x: cx - (cx - view.x) * (nextScale / old),
-            y: cy - (cy - view.y) * (nextScale / old)
+          const oldView = viewRef.current;
+          if (event.ctrlKey || event.metaKey) {
+            const rect = canvasRef.current?.getBoundingClientRect();
+            if (!rect) return;
+            const cx = event.clientX - rect.left - rect.width / 2;
+            const cy = event.clientY - rect.top - rect.height / 2;
+            const old = oldView.s;
+            const nextScale = Math.min(2.2, Math.max(0.35, old * (event.deltaY < 0 ? 1.1 : 0.9)));
+            applyView({
+              s: nextScale,
+              x: cx - (cx - oldView.x) * (nextScale / old),
+              y: cy - (cy - oldView.y) * (nextScale / old)
+            });
+            return;
+          }
+          applyView({
+            ...oldView,
+            x: oldView.x - event.deltaX,
+            y: oldView.y - event.deltaY
           });
         }}
       >
-        <div className="world" style={worldStyle}>
+        <div ref={worldRef} className={`world ${isViewAnimating ? "view-animated" : ""}`} style={worldStyle}>
           <svg className="edges">
             <g>
               {layout?.edges.map((edge) => {
@@ -685,7 +906,8 @@ export default function App() {
             {nodes.map((node) => {
               const point = layout?.nodes.get(node.id);
               if (!point) return null;
-              const isSelected = selectedId === node.id;
+                  const isSelected = selectedId === node.id;
+                  const isMultiSelected = multiSelectedIds.has(node.id);
               const hasKids = node.children.length > 0;
               const isCollapsed = collapsedIds.has(node.id);
               return (
@@ -698,20 +920,27 @@ export default function App() {
                     node.kind,
                     point.depth === 1 ? "d1" : "",
                     isSelected ? "sel" : "",
+                    isMultiSelected ? "multi-sel" : "",
+                    editingId === node.id ? "editing" : "",
                     hasKids ? "haskids" : "",
                     isCollapsed ? "collapsed" : ""
                   ].filter(Boolean).join(" ")}
                   style={{ left: point.x, top: point.y, animationDelay: `${point.depth * 70}ms` }}
                   onClick={(event) => {
                     event.stopPropagation();
+                    if (suppressCanvasClickRef.current) {
+                      suppressCanvasClickRef.current = false;
+                      return;
+                    }
+                    setMultiSelectedIds(new Set());
                     setSelectedId(node.id);
                   }}
                   onMouseDown={(event) => {
                     if (node.kind !== "topic" || editingId === node.id) return;
                     if ((event.target as HTMLElement).closest(".badge, input")) return;
                     event.stopPropagation();
+                    setMultiSelectedIds(new Set());
                     setSelectedId(node.id);
-                    setDrag({ x: event.clientX, y: event.clientY, vx: view.x, vy: view.y });
                   }}
                   onDoubleClick={(event) => {
                     event.stopPropagation();
@@ -721,11 +950,11 @@ export default function App() {
                 >
                   <div className="card">
                     {editingId === node.id ? (
-                      <input
+                      <textarea
                         className="edit-input"
                         value={editingText}
                         autoFocus
-                        style={{ width: `${Math.max(5, editingText.length + 1)}ch` }}
+                        rows={Math.min(6, Math.max(2, editingText.split("\n").length))}
                         onClick={(event) => event.stopPropagation()}
                         onFocus={(event) => {
                           if (selectEditTextRef.current === node.id) {
@@ -736,7 +965,7 @@ export default function App() {
                         onChange={(event) => setEditingText(event.target.value)}
                         onBlur={() => commitEdit(node.id)}
                         onKeyDown={(event) => {
-                          if (event.key === "Enter") {
+                          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
                             event.preventDefault();
                             commitEdit(node.id);
                           }
@@ -748,7 +977,7 @@ export default function App() {
                       />
                     ) : (
                       <>
-                        {node.text}
+                        <span className="node-label" title={node.text}>{node.text}</span>
                         {hasKids && (
                           <span
                             className={`badge ${isCollapsed ? "plus" : "minus"}`}
@@ -773,22 +1002,57 @@ export default function App() {
             })}
           </div>
         </div>
+        {selectionBox && <div className="selection-box" style={selectionBoxStyle(selectionBox)} />}
       </div>
+
+      {multiSelectedCount > 1 && selectionBox === null && multiActionbarScreen && (
+        <div className="actionbar show multi-actionbar" style={{ left: multiActionbarScreen.x, top: multiActionbarScreen.y - 14 }}>
+          <button className="danger" onClick={deleteMultiSelected}>✕ 删除 {multiSelectedCount} 个</button>
+        </div>
+      )}
 
       {selected && selectedScreen && (
         <div className="actionbar show" style={{ left: selectedScreen.x, top: selectedScreen.y - 30 * view.s - 14 }}>
-          <button onClick={() => void handleExpand("dig")}>⤵ 深挖</button>
-          <button onClick={() => void handleExpand("ask")}>？ 追问</button>
+          <button disabled={Boolean(loadingText)} onClick={() => void handleExpand("dig")}>⤵ 深挖</button>
+          <button disabled={Boolean(loadingText)} onClick={() => void handleExpand("ask")}>？ 追问</button>
           <button onClick={addManualChild}>＋ 补充</button>
           <span className="sep" />
           <button className="danger" onClick={deleteSelected}>✕ 删除</button>
         </div>
       )}
 
+      {mindmap && focusMode && (
+        <div className="mini-composer">
+          <button className="mini-history" onClick={() => setFocusMode(false)}>共创记录</button>
+          <div className="mini-context">
+            {multiSelectedCount > 1 ? `已选择 ${multiSelectedCount} 个节点` : selected ? `针对：${selected.text}` : "追加新分支"}
+          </div>
+          <textarea
+            value={dockText}
+            disabled={multiSelectedCount > 1}
+            placeholder={multiSelectedCount > 1 ? "已多选节点，只能删除…" : selected ? "输入问题或补充…" : "追加新分支…"}
+            onChange={(event) => setDockText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void submitDockText();
+              }
+            }}
+          />
+          <button className="send" disabled={multiSelectedCount > 1 || !dockText.trim()} onClick={() => void submitDockText()}>↑</button>
+        </div>
+      )}
+
       <div className={`zoomctl ${mindmap ? "show" : ""}`}>
-        <button onClick={() => setView((v) => ({ ...v, s: Math.min(2.2, v.s * 1.15) }))}>＋</button>
+        <button onClick={() => {
+          const current = viewRef.current;
+          animateViewTo({ ...current, s: Math.min(2.2, current.s * 1.15) });
+        }}>＋</button>
         <button onClick={fit}>⊡</button>
-        <button onClick={() => setView((v) => ({ ...v, s: Math.max(0.35, v.s * 0.87) }))}>－</button>
+        <button onClick={() => {
+          const current = viewRef.current;
+          animateViewTo({ ...current, s: Math.max(0.35, current.s * 0.87) });
+        }}>－</button>
       </div>
 
       <div className={`treectl ${mindmap ? "show" : ""}`}>
@@ -823,13 +1087,23 @@ export default function App() {
                     if (event.key === "Enter") void runGenerate(heroText, heroType || undefined);
                   }}
                 />
-                <button className="send hero-ai-send" disabled={!heroText.trim()} onClick={() => void runGenerate(heroText, heroType || undefined)}>AI</button>
+                <button className="send hero-ai-send" disabled={!heroText.trim() || Boolean(loadingText)} onClick={() => void runGenerate(heroText, heroType || undefined)}>AI</button>
                 <button className="hero-plus-send" disabled={!heroText.trim()} onClick={() => startBlankMindmap(heroText)}>＋</button>
               </div>
             </div>
-            <button className="records-entry" onClick={() => setRecordsOpen(true)}>
-              理清记录
-            </button>
+            <div className="hero-tools">
+              <label className="search-switch">
+                <input
+                  type="checkbox"
+                  checked={webSearchEnabled}
+                  onChange={(event) => setWebSearchEnabled(event.target.checked)}
+                />
+                <span>联网搜索</span>
+              </label>
+              <button className="records-entry" onClick={() => setRecordsOpen(true)}>
+                理清记录
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -849,18 +1123,42 @@ export default function App() {
                 <div className="records-empty">还没有记录。先理清一件事，这里会自动保存。</div>
               ) : (
                 records.map((record) => (
-                  <button key={record.id} className="record-row" onClick={() => openRecord(record)}>
-                    <span className="record-main">
-                      <span className="record-title">{record.title}</span>
-                      <span className="record-meta">{record.mindmap.root.children.length} 个主分支</span>
-                    </span>
-                    <span className="record-side">
-                      <span className="record-type">{TYPE_LABELS[record.type]}</span>
-                      <span className="record-time">{formatRecordTime(record.updatedAt)}</span>
-                    </span>
-                  </button>
+                  <div key={record.id} className="record-row">
+                    <button className="record-open" onClick={() => openRecord(record)}>
+                      <span className="record-main">
+                        <span className="record-title">{record.title}</span>
+                        <span className="record-meta">{record.mindmap.root.children.length} 个主分支</span>
+                      </span>
+                      <span className="record-side">
+                        <span className="record-type">{TYPE_LABELS[record.type]}</span>
+                        <span className="record-time">{formatRecordTime(record.updatedAt)}</span>
+                      </span>
+                    </button>
+                    <button
+                      className="record-delete"
+                      onClick={() => setDeleteConfirmRecord(record)}
+                      aria-label={`删除记录：${record.title}`}
+                    >
+                      删除
+                    </button>
+                  </div>
                 ))
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteConfirmRecord && (
+        <div className="confirm-modal" onClick={() => setDeleteConfirmRecord(null)}>
+          <div className="confirm-dialog" onClick={(event) => event.stopPropagation()}>
+            <div className="confirm-title">删除这条理清记录？</div>
+            <div className="confirm-text">
+              删除后无法从本地记录中恢复。记录：{deleteConfirmRecord.title}
+            </div>
+            <div className="confirm-actions">
+              <button onClick={() => setDeleteConfirmRecord(null)}>取消</button>
+              <button className="danger" onClick={() => deleteRecord(deleteConfirmRecord)}>确认删除</button>
             </div>
           </div>
         </div>
@@ -869,6 +1167,7 @@ export default function App() {
       <div className={`loading ${loadingText ? "show" : ""}`}>
         <div className="pulse"><span /><span /><span /></div>
         <div className="txt">{loadingText}</div>
+        <button className="loading-cancel" onClick={cancelAiRequest}>取消生成</button>
       </div>
       <div className={`toast ${toast ? "show" : ""}`}>{toast?.text}</div>
     </>
@@ -880,6 +1179,10 @@ function labelForKind(kind: MindmapNode["kind"]) {
   if (kind === "user_question") return "你问";
   if (kind === "ai_answer") return "AI 答";
   return "";
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === "AbortError";
 }
 
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
@@ -923,4 +1226,16 @@ function drawElbowEdge(ctx: CanvasRenderingContext2D, fromX: number, fromY: numb
   ctx.lineTo(midX, toY - radius * yDir);
   ctx.quadraticCurveTo(midX, toY, midX + radius, toY);
   ctx.lineTo(toX, toY);
+}
+
+function viewTransform(view: ViewState) {
+  return `translate(${view.x}px, ${view.y}px) scale(${view.s})`;
+}
+
+function selectionBoxStyle(box: SelectionBox) {
+  const left = Math.min(box.startX, box.currentX);
+  const top = Math.min(box.startY, box.currentY);
+  const width = Math.abs(box.currentX - box.startX);
+  const height = Math.abs(box.currentY - box.startY);
+  return { left, top, width, height };
 }

@@ -1,10 +1,11 @@
 import type { ExpandMode, MessageJudgement, Mindmap, MindmapNode, MindmapType } from "./types";
 
-async function requestJson<T>(url: string, body: unknown): Promise<T> {
+async function requestJson<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -13,18 +14,18 @@ async function requestJson<T>(url: string, body: unknown): Promise<T> {
   return data as T;
 }
 
-export function generateMindmap(text: string, forcedType?: MindmapType) {
-  return requestJson<Mindmap>("/api/generate", { text, forcedType });
+export function generateMindmap(text: string, forcedType?: MindmapType, webSearch?: boolean, signal?: AbortSignal) {
+  return requestJson<Mindmap>("/api/generate", { text, forcedType, webSearch }, signal);
 }
 
-export function expandNode(mindmap: Mindmap, targetPath: string[], mode: ExpandMode) {
-  return requestJson<{ children: MindmapNode[] }>("/api/expand", { mindmap, targetPath, mode });
+export function expandNode(mindmap: Mindmap, targetPath: string[], mode: ExpandMode, signal?: AbortSignal) {
+  return requestJson<{ children: MindmapNode[] }>("/api/expand", { mindmap, targetPath, mode }, signal);
 }
 
-export function respondToNode(mindmap: Mindmap, targetPath: string[], message: string) {
+export function respondToNode(mindmap: Mindmap, targetPath: string[], message: string, signal?: AbortSignal) {
   return requestJson<{ judged: MessageJudgement; nodes: MindmapNode[] }>("/api/respond", {
     mindmap,
     targetPath,
     message
-  });
+  }, signal);
 }
