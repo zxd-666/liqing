@@ -8,36 +8,49 @@ type ChatMessage = {
   content: string;
 };
 
+type AiModelConfig = {
+  provider?: string;
+  model?: string;
+  baseUrl?: string;
+  apiKey?: string;
+};
+
 const API_URL = "https://api.deepseek.com/chat/completions";
 const DEEPSEEK_TIMEOUT_MS = 45_000;
 
-function getApiKey() {
-  return process.env.DEEPSEEK_API_KEY?.trim();
+function getApiKey(config?: AiModelConfig) {
+  return config?.apiKey?.trim() || process.env.DEEPSEEK_API_KEY?.trim();
 }
 
-function generateModel() {
-  return process.env.DEEPSEEK_MODEL_GENERATE || "deepseek-v4-pro";
+function getApiUrl(config?: AiModelConfig) {
+  const raw = config?.baseUrl?.trim();
+  if (!raw) return API_URL;
+  return raw.endsWith("/chat/completions") ? raw : `${raw.replace(/\/+$/, "")}/chat/completions`;
 }
 
-function lightModel() {
-  return process.env.DEEPSEEK_MODEL_LIGHT || "deepseek-v4-flash";
+function generateModel(config?: AiModelConfig) {
+  return config?.model?.trim() || process.env.DEEPSEEK_MODEL_GENERATE || "deepseek-v4-pro";
 }
 
-export function assertDeepSeekConfigured() {
-  if (!getApiKey()) {
-    const err = new Error("未配置 DeepSeek API key，请在 .env 中设置 DEEPSEEK_API_KEY");
+function lightModel(config?: AiModelConfig) {
+  return config?.model?.trim() || process.env.DEEPSEEK_MODEL_LIGHT || "deepseek-v4-flash";
+}
+
+export function assertDeepSeekConfigured(config?: AiModelConfig) {
+  if (!getApiKey(config)) {
+    const err = new Error("未配置 API key，请在 Model 中填写 key，或在 .env 中设置 DEEPSEEK_API_KEY");
     err.name = "MissingDeepSeekKey";
     throw err;
   }
 }
 
-async function callDeepSeekJson(model: string, messages: ChatMessage[], signal?: AbortSignal) {
-  assertDeepSeekConfigured();
-  const res = await fetchWithTimeout(API_URL, {
+async function callDeepSeekJson(model: string, messages: ChatMessage[], signal?: AbortSignal, config?: AiModelConfig) {
+  assertDeepSeekConfigured(config);
+  const res = await fetchWithTimeout(getApiUrl(config), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${getApiKey()}`
+      Authorization: `Bearer ${getApiKey(config)}`
     },
     body: JSON.stringify({
       model,
@@ -49,7 +62,8 @@ async function callDeepSeekJson(model: string, messages: ChatMessage[], signal?:
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const msg = data?.error?.message || `DeepSeek 请求失败：HTTP ${res.status}`;
+    const provider = config?.provider?.trim() || "DeepSeek";
+    const msg = data?.error?.message || `${provider} 请求失败：HTTP ${res.status}`;
     throw new Error(msg);
   }
 
@@ -60,11 +74,17 @@ async function callDeepSeekJson(model: string, messages: ChatMessage[], signal?:
   return JSON.parse(content);
 }
 
-async function callWithRetry<T>(model: string, messages: ChatMessage[], parser: (raw: unknown) => T, signal?: AbortSignal) {
+async function callWithRetry<T>(
+  model: string,
+  messages: ChatMessage[],
+  parser: (raw: unknown) => T,
+  signal?: AbortSignal,
+  config?: AiModelConfig
+) {
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const raw = await callDeepSeekJson(model, messages, signal);
+      const raw = await callDeepSeekJson(model, messages, signal, config);
       return parser(raw);
     } catch (err) {
       if (isAbortError(err)) throw err;
@@ -119,21 +139,35 @@ const baseSystemPrompt = [
   "初始脑图应尽量完整，而不是只给大纲；后续人工与 AI 是在完整图上继续优化。"
 ].join("\n");
 
+function systemPrompt(customPrompt?: string) {
+  const custom = customPrompt?.trim();
+  if (!custom) return baseSystemPrompt;
+  return [
+    "以下是用户自定义 Prompt，优先遵循：",
+    custom,
+    "",
+    "以下是兜底约束。若用户自定义 Prompt 与 JSON 输出格式、节点可读性、安全事实边界冲突，优先保证兜底约束：",
+    baseSystemPrompt
+  ].join("\n");
+}
+
 export async function generateMindmap(input: {
   text: string;
   forcedType?: MindmapType;
   webSearch?: boolean;
+  prompt?: string;
+  modelConfig?: AiModelConfig;
   signal?: AbortSignal;
 }): Promise<Mindmap> {
-  assertDeepSeekConfigured();
+  assertDeepSeekConfigured(input.modelConfig);
   const { text, forcedType, webSearch, signal } = input;
   const typeInstruction = forcedType
     ? `用户已手动指定类型为 ${TYPE_LABELS[forcedType]}，必须返回 type="${forcedType}"。`
     : "请自动判断 type，只能是 decision、cause、concept、plan 之一。";
   const searchContext = webSearch ? formatSearchContext(await searchWeb(text, signal)) : "";
 
-  return callWithRetry(generateModel(), [
-    { role: "system", content: baseSystemPrompt },
+  return callWithRetry(generateModel(input.modelConfig), [
+    { role: "system", content: systemPrompt(input.prompt) },
     {
       role: "user",
       content: [
@@ -155,13 +189,15 @@ export async function generateMindmap(input: {
         `用户输入：${text}`
       ].join("\n")
     }
-  ], (raw) => normalizeMindmap(raw, forcedType), signal);
+  ], (raw) => normalizeMindmap(raw, forcedType), signal, input.modelConfig);
 }
 
 export async function expandMindmapNode(input: {
   mindmap: Mindmap;
   targetPath: string[];
   mode: "dig" | "ask";
+  prompt?: string;
+  modelConfig?: AiModelConfig;
   signal?: AbortSignal;
 }) {
   const modeText =
@@ -169,8 +205,8 @@ export async function expandMindmapNode(input: {
       ? "深挖该节点，补充 2 到 4 个更细的子节点。"
       : "生成 1 个能促进用户继续思考的 AI 追问节点，kind 必须是 ai_question。";
 
-  return callWithRetry(lightModel(), [
-    { role: "system", content: baseSystemPrompt },
+  return callWithRetry(lightModel(input.modelConfig), [
+    { role: "system", content: systemPrompt(input.prompt) },
     {
       role: "user",
       content: [
@@ -183,17 +219,45 @@ export async function expandMindmapNode(input: {
         `当前脑图：${JSON.stringify(input.mindmap)}`
       ].join("\n")
     }
-  ], normalizeChildren, input.signal);
+  ], normalizeChildren, input.signal, input.modelConfig);
+}
+
+export async function rebuildMindmapNodeChildren(input: {
+  mindmap: Mindmap;
+  targetPath: string[];
+  prompt?: string;
+  modelConfig?: AiModelConfig;
+  signal?: AbortSignal;
+}) {
+  return callWithRetry(lightModel(input.modelConfig), [
+    { role: "system", content: systemPrompt(input.prompt) },
+    {
+      role: "user",
+      content: [
+        "重新整理用户选中节点下的子节点。",
+        "目标不是新增内容，而是替换该节点当前 children，让这一层更清晰、更完整、更少重复。",
+        "必须保留当前子节点里有价值的信息；合并重复、空泛、层级混乱的表达。",
+        "需要补齐该节点下缺失的关键变量、风险、边界、证据、验证方式或行动项。",
+        "输出 2 到 5 个普通 node 子节点；可以带下一层 children，但不要过度展开。",
+        "返回格式：{\"children\":[{\"text\":\"短节点\",\"kind\":\"node\",\"children\":[]}]}",
+        `脑图类型：${input.mindmap.type}`,
+        `目标路径：${input.targetPath.join(" > ")}`,
+        `当前脑图：${JSON.stringify(input.mindmap)}`
+      ].join("\n")
+    }
+  ], normalizeChildren, input.signal, input.modelConfig);
 }
 
 export async function respondToNode(input: {
   mindmap: Mindmap;
   targetPath: string[];
   message: string;
+  prompt?: string;
+  modelConfig?: AiModelConfig;
   signal?: AbortSignal;
 }) {
-  return callWithRetry(lightModel(), [
-    { role: "system", content: baseSystemPrompt },
+  return callWithRetry(lightModel(input.modelConfig), [
+    { role: "system", content: systemPrompt(input.prompt) },
     {
       role: "user",
       content: [
@@ -207,5 +271,5 @@ export async function respondToNode(input: {
         `当前脑图：${JSON.stringify(input.mindmap)}`
       ].join("\n")
     }
-  ], normalizeRespond, input.signal);
+  ], normalizeRespond, input.signal, input.modelConfig);
 }

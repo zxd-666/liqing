@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { expandNode, generateMindmap, respondToNode } from "./lib/api";
+import { expandNode, generateMindmap, rebuildNodeChildren, respondToNode } from "./lib/api";
+import { DEFAULT_MODEL_CONFIG, buildAiRequestSettings, loadAiModelConfig, loadAiPrompt, saveAiModelConfig, saveAiPrompt } from "./lib/aiSettings";
+import type { AiModelConfig } from "./lib/aiSettings";
 import { layoutMindmap } from "./lib/layout";
+import type { LayoutNode } from "./lib/layout";
 import { toPlantUML } from "./lib/plantuml";
 import { formatRecordTime, loadActiveRecordId, loadRecords, saveActiveRecordId, saveRecords, sortRecords, titleForRecord } from "./lib/records";
 import type { ChatEntry, Mindmap, MindmapNode, MindmapRecord, MindmapType } from "./lib/types";
@@ -10,6 +13,31 @@ import { createNode, findNode, pathToNode, removeNode, updateNode, visibleNodes,
 type ViewState = { x: number; y: number; s: number };
 type Toast = { id: number; text: string };
 type SelectionBox = { startX: number; startY: number; currentX: number; currentY: number };
+type UndoSnapshot = {
+  mindmap: Mindmap;
+  collapsedIds: Set<string>;
+  selectedId: string | null;
+  multiSelectedIds: Set<string>;
+};
+type NodeDrag = {
+  id: string;
+  startX: number;
+  startY: number;
+  currentX: number;
+  currentY: number;
+  grabOffsetX: number;
+  grabOffsetY: number;
+  started: boolean;
+  targetId: string | null;
+};
+type PanDrag = {
+  startX: number;
+  startY: number;
+  currentX: number;
+  currentY: number;
+  startView: ViewState;
+  started: boolean;
+};
 
 const mindmapTypes: MindmapType[] = ["decision", "cause", "concept", "plan"];
 const DEFAULT_ROOT_OFFSET_X = -600;
@@ -19,13 +47,14 @@ export default function App() {
   const [topic, setTopic] = useState("");
   const [heroText, setHeroText] = useState("");
   const [heroType, setHeroType] = useState<MindmapType | null>(null);
-  const [webSearchEnabled, setWebSearchEnabled] = useState(false);
   const [dockText, setDockText] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [multiSelectedIds, setMultiSelectedIds] = useState<Set<string>>(new Set());
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
   const [view, setView] = useState<ViewState>({ x: 0, y: 0, s: 1 });
   const [selectionBox, setSelectionBox] = useState<SelectionBox | null>(null);
+  const [nodeDrag, setNodeDrag] = useState<NodeDrag | null>(null);
+  const [panDrag, setPanDrag] = useState<PanDrag | null>(null);
   const [loadingText, setLoadingText] = useState("");
   const [toast, setToast] = useState<Toast | null>(null);
   const [typeMenuOpen, setTypeMenuOpen] = useState(false);
@@ -35,10 +64,15 @@ export default function App() {
   const [chatEntries, setChatEntries] = useState<ChatEntry[]>([]);
   const [records, setRecords] = useState<MindmapRecord[]>(() => loadRecords());
   const [recordsOpen, setRecordsOpen] = useState(false);
+  const [promptOpen, setPromptOpen] = useState(false);
+  const [modelOpen, setModelOpen] = useState(false);
+  const [aiPrompt, setAiPrompt] = useState(() => loadAiPrompt());
+  const [aiModelConfig, setAiModelConfig] = useState<AiModelConfig>(() => loadAiModelConfig());
   const [deleteConfirmRecord, setDeleteConfirmRecord] = useState<MindmapRecord | null>(null);
   const [activeRecordId, setActiveRecordId] = useState<string | null>(null);
   const [isViewAnimating, setIsViewAnimating] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
+  const [undoStack, setUndoStack] = useState<UndoSnapshot[]>([]);
 
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const worldRef = useRef<HTMLDivElement | null>(null);
@@ -52,13 +86,36 @@ export default function App() {
   const pendingFocusNodeRef = useRef<string | null>(null);
   const suppressCanvasClickRef = useRef(false);
   const selectionBoxRef = useRef<SelectionBox | null>(null);
+  const nodeDragRef = useRef<NodeDrag | null>(null);
+  const panDragRef = useRef<PanDrag | null>(null);
 
   const root = mindmap?.root ?? null;
   const layout = useMemo(() => (root ? layoutMindmap(root, collapsedIds) : null), [root, collapsedIds]);
   const nodes = useMemo(() => (root ? visibleNodes(root, collapsedIds) : []), [root, collapsedIds]);
+  const detailStats = useMemo(() => {
+    if (!root) return null;
+    let total = 0;
+    walkNodes(root, () => {
+      total += 1;
+    });
+    return {
+      branchCount: root.children.length,
+      nodeCount: Math.max(0, total - 1)
+    };
+  }, [root]);
   const selected = root && selectedId ? findNode(root, selectedId) : null;
   const selectedLayout = selectedId ? layout?.nodes.get(selectedId) : null;
   const multiSelectedCount = multiSelectedIds.size;
+  const draggedNodeIds = useMemo(() => {
+    if (!root || !nodeDrag?.started) return new Set<string>();
+    const draggedNode = findNode(root, nodeDrag.id);
+    if (!draggedNode) return new Set<string>();
+    const ids = new Set<string>();
+    walkNodes(draggedNode, (node) => ids.add(node.id));
+    return ids;
+  }, [nodeDrag, root]);
+  const dragDelta = nodeDrag?.started ? dragDeltaInWorld(nodeDrag, view) : null;
+  const aiRequestSettings = useMemo(() => buildAiRequestSettings(aiPrompt, aiModelConfig), [aiModelConfig, aiPrompt]);
 
   const flash = useCallback((text: string) => {
     const id = Date.now();
@@ -71,6 +128,41 @@ export default function App() {
   const addChat = useCallback((entry: Omit<ChatEntry, "id">) => {
     setChatEntries((current) => [...current, { ...entry, id: crypto.randomUUID() }]);
   }, []);
+
+  const pushUndoSnapshot = useCallback(() => {
+    if (!mindmap) return;
+    const snapshot: UndoSnapshot = {
+      mindmap: cloneMindmap(mindmap),
+      collapsedIds: new Set(collapsedIds),
+      selectedId,
+      multiSelectedIds: new Set(multiSelectedIds)
+    };
+    setUndoStack((current) => [...current.slice(-39), snapshot]);
+  }, [collapsedIds, mindmap, multiSelectedIds, selectedId]);
+
+  const undoLastStep = useCallback(() => {
+    setUndoStack((current) => {
+      const snapshot = current.at(-1);
+      if (!snapshot) {
+        flash("没有可撤销的操作");
+        return current;
+      }
+      setMindmap(cloneMindmap(snapshot.mindmap));
+      setCollapsedIds(new Set(snapshot.collapsedIds));
+      setSelectedId(snapshot.selectedId);
+      setMultiSelectedIds(new Set(snapshot.multiSelectedIds));
+      setEditingId(null);
+      setEditingText("");
+      setSelectionBox(null);
+      setNodeDrag(null);
+      setPanDrag(null);
+      selectionBoxRef.current = null;
+      nodeDragRef.current = null;
+      panDragRef.current = null;
+      flash("已撤销");
+      return current.slice(0, -1);
+    });
+  }, [flash]);
 
   const applyView = useCallback((next: ViewState, commit = true) => {
     viewRef.current = next;
@@ -102,6 +194,13 @@ export default function App() {
   useEffect(() => {
     chatListRef.current?.scrollTo({ top: chatListRef.current.scrollHeight, behavior: "smooth" });
   }, [chatEntries, loadingText]);
+
+  useEffect(() => {
+    if (!typeMenuOpen) return;
+    const closeTypeMenu = () => setTypeMenuOpen(false);
+    window.addEventListener("click", closeTypeMenu);
+    return () => window.removeEventListener("click", closeTypeMenu);
+  }, [typeMenuOpen]);
 
   useEffect(() => {
     const recordId = loadActiveRecordId();
@@ -152,6 +251,7 @@ export default function App() {
   }, [activeRecordId, chatEntries, mindmap, topic]);
 
   const applyMindmap = useCallback((next: Mindmap, nextTopic: string, recordId?: string) => {
+    if (mindmap) pushUndoSnapshot();
     shouldFitOnMindmapChangeRef.current = true;
     setActiveRecordId(recordId ?? activeRecordId ?? crypto.randomUUID());
     setMindmap(next);
@@ -160,7 +260,7 @@ export default function App() {
     setMultiSelectedIds(new Set());
     setCollapsedIds(new Set());
     setFocusMode(true);
-  }, [activeRecordId]);
+  }, [activeRecordId, mindmap, pushUndoSnapshot]);
 
   const runGenerate = useCallback(
     async (text: string, forcedType?: MindmapType) => {
@@ -172,32 +272,28 @@ export default function App() {
       }
       const controller = new AbortController();
       activeRequestRef.current = controller;
-      setLoadingText(webSearchEnabled ? "联网搜索中…" : forcedType ? "AI 理清中" : "正在理清…");
+      setLoadingText(forcedType ? "AI 理清中" : "正在理清…");
       addChat({
         role: "user",
-        text: [
-          forcedType ? `按「${TYPE_LABELS[forcedType]}」重新理清：${trimmed}` : trimmed,
-          webSearchEnabled ? "已开启联网搜索" : ""
-        ].filter(Boolean).join("\n")
+        text: forcedType ? `按「${TYPE_LABELS[forcedType]}」重新理清：${trimmed}` : trimmed
       });
       addChat({
         role: "thinking",
-        title: webSearchEnabled ? "AI 联网整理中" : forcedType ? "AI 重新整理中" : "AI 正在理清",
-        text: webSearchEnabled ? "我会先联网搜索，再把可参考的信息整理进脑图。" : "我会先判断问题类型，再拆出一张可俯瞰的脑图。",
+        title: forcedType ? "AI 重新整理中" : "AI 正在理清",
+        text: "我会先判断问题类型，再拆出一张可俯瞰的脑图。",
         steps: [
-          webSearchEnabled ? "联网搜索相关资料" : "",
-          forcedType ? `采用你指定的类型：${TYPE_LABELS[forcedType]}` : "判断属于决策 / 找根因 / 概念 / 规划中的哪一类",
+          forcedType ? `采用你指定的类型：${TYPE_LABELS[forcedType]}` : "判断属于做决策 / 找根因 / 理概念 / 做规划中的哪一类",
           "提取中心主题和一级结构",
           "补齐关键分支，控制节点为短句"
         ].filter(Boolean)
       });
       try {
-        const next = await generateMindmap(trimmed, forcedType, webSearchEnabled, controller.signal);
+        const next = await generateMindmap(trimmed, forcedType, aiRequestSettings, controller.signal);
         applyMindmap(next, trimmed);
         addChat({
           role: "ai",
           title: `已生成「${TYPE_LABELS[next.type]}」脑图`,
-          text: `我已${webSearchEnabled ? "结合搜索结果" : ""}把「${trimmed}」整理成 ${next.root.children.length} 个主分支。你可以点右侧任意节点深挖、追问或补充。`
+          text: `我已把「${trimmed}」整理成 ${next.root.children.length} 个主分支。你可以点右侧任意节点深挖、追问或补充。`
         });
       } catch (err) {
         if (isAbortError(err)) return;
@@ -212,7 +308,7 @@ export default function App() {
         setLoadingText("");
       }
     },
-    [addChat, applyMindmap, flash, webSearchEnabled]
+    [addChat, aiRequestSettings, applyMindmap, flash]
   );
 
   const regenerate = useCallback(
@@ -269,6 +365,22 @@ export default function App() {
     viewRef.current = view;
   }, [view]);
 
+  useEffect(() => {
+    if (!editingId) return;
+    requestAnimationFrame(() => {
+      const textarea = nodeRefs.current[editingId]?.querySelector("textarea.edit-input") as HTMLTextAreaElement | null;
+      if (!textarea) return;
+      textarea.focus();
+      if (selectEditTextRef.current === editingId) {
+        textarea.select();
+        selectEditTextRef.current = null;
+        return;
+      }
+      const end = textarea.value.length;
+      textarea.setSelectionRange(end, end);
+    });
+  }, [editingId]);
+
   const focusNodeInView = useCallback((nodeId: string) => {
     const point = layout?.nodes.get(nodeId);
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -299,6 +411,100 @@ export default function App() {
     return next;
   }, [nodes]);
 
+  const nearestNodeIdByDraggedCorner = useCallback((drag: NodeDrag) => {
+    if (!root) return null;
+    const cornerX = drag.currentX - drag.grabOffsetX;
+    const cornerY = drag.currentY - drag.grabOffsetY;
+    const candidates = nodes
+      .filter((node) => node.id !== drag.id && !isDescendant(root, drag.id, node.id))
+      .map((node) => {
+        const el = nodeRefs.current[node.id];
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        return { id: node.id, distance: distanceToRect(cornerX, cornerY, rect) };
+      })
+      .filter((item): item is { id: string; distance: number } => Boolean(item));
+    const nearest = candidates.reduce<{ id: string; distance: number } | null>((best, item) => {
+      if (!best || item.distance < best.distance) return item;
+      return best;
+    }, null);
+    return nearest && nearest.distance <= 88 ? nearest.id : null;
+  }, [nodes, root]);
+
+  const moveNodeToParent = useCallback((sourceId: string, targetId: string) => {
+    if (!mindmap) return;
+    const source = findNode(mindmap.root, sourceId);
+    const target = findNode(mindmap.root, targetId);
+    if (!source || !target || source.kind === "topic" || source.id === target.id || isDescendant(mindmap.root, source.id, target.id)) {
+      return;
+    }
+    pushUndoSnapshot();
+    setMindmap((current) => {
+      if (!current) return current;
+      const currentSource = findNode(current.root, sourceId);
+      const currentTarget = findNode(current.root, targetId);
+      if (!currentSource || !currentTarget || currentSource.kind === "topic" || currentSource.id === currentTarget.id || isDescendant(current.root, currentSource.id, currentTarget.id)) {
+        return current;
+      }
+      const rootWithoutSource = removeNode(current.root, currentSource.id);
+      return {
+        ...current,
+        root: updateNode(rootWithoutSource, currentTarget.id, (node) => ({
+          ...node,
+          children: [...node.children, currentSource]
+        }))
+      };
+    });
+    setCollapsedIds((current) => {
+      const next = new Set(current);
+      next.delete(targetId);
+      return next;
+    });
+    setSelectedId(sourceId);
+    setMultiSelectedIds(new Set());
+    pendingFocusNodeRef.current = sourceId;
+    addChat({
+      role: "system",
+      title: "已移动节点",
+      text: "已将节点移动到新的父节点下。"
+    });
+  }, [addChat, mindmap, pushUndoSnapshot]);
+
+  const reorderNodeAtPoint = useCallback((sourceId: string, clientY: number) => {
+    if (!mindmap || !layout || !canvasRef.current) return false;
+    const parentInfo = findParentInfo(mindmap.root, sourceId);
+    if (!parentInfo) return false;
+    const sourceIndex = parentInfo.parent.children.findIndex((child) => child.id === sourceId);
+    if (sourceIndex < 0) return false;
+    const rect = canvasRef.current.getBoundingClientRect();
+    const worldY = (clientY - rect.top - rect.height / 2 - viewRef.current.y) / viewRef.current.s;
+    const siblingsWithoutSource = parentInfo.parent.children.filter((child) => child.id !== sourceId);
+    let nextIndex = siblingsWithoutSource.findIndex((child) => {
+      const point = layout.nodes.get(child.id);
+      return point ? worldY < point.y : false;
+    });
+    if (nextIndex === -1) nextIndex = siblingsWithoutSource.length;
+    const currentOrder = parentInfo.parent.children.map((child) => child.id);
+    const nextOrder = [...siblingsWithoutSource];
+    nextOrder.splice(nextIndex, 0, parentInfo.node);
+    if (currentOrder.join("|") === nextOrder.map((child) => child.id).join("|")) return false;
+
+    pushUndoSnapshot();
+    setMindmap((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        root: updateNode(current.root, parentInfo.parent.id, (node) => ({
+          ...node,
+          children: nextOrder
+        }))
+      };
+    });
+    setSelectedId(sourceId);
+    setMultiSelectedIds(new Set());
+    return true;
+  }, [layout, mindmap, pushUndoSnapshot]);
+
   useEffect(() => {
     const nodeId = pendingFocusNodeRef.current;
     if (!nodeId || !layout?.nodes.has(nodeId)) return;
@@ -308,6 +514,46 @@ export default function App() {
 
   useEffect(() => {
     const onMove = (event: MouseEvent) => {
+      if (panDrag) {
+        const currentDrag = panDragRef.current ?? panDrag;
+        const distance = Math.hypot(event.clientX - currentDrag.startX, event.clientY - currentDrag.startY);
+        const nextDrag = {
+          ...currentDrag,
+          currentX: event.clientX,
+          currentY: event.clientY,
+          started: currentDrag.started || distance > 4
+        };
+        panDragRef.current = nextDrag;
+        setPanDrag(nextDrag);
+        if (nextDrag.started) {
+          event.preventDefault();
+          applyView({
+            ...nextDrag.startView,
+            x: nextDrag.startView.x + event.clientX - nextDrag.startX,
+            y: nextDrag.startView.y + event.clientY - nextDrag.startY
+          });
+        }
+        return;
+      }
+      if (nodeDrag) {
+        const currentDrag = nodeDragRef.current ?? nodeDrag;
+        const distance = Math.hypot(event.clientX - currentDrag.startX, event.clientY - currentDrag.startY);
+        const nextDrag = {
+          ...currentDrag,
+          currentX: event.clientX,
+          currentY: event.clientY,
+          started: currentDrag.started || distance > 4,
+          targetId: distance > 4 ? nearestNodeIdByDraggedCorner({ ...currentDrag, currentX: event.clientX, currentY: event.clientY }) : null
+        };
+        nodeDragRef.current = nextDrag;
+        setNodeDrag(nextDrag);
+        if (nextDrag.started) {
+          event.preventDefault();
+          setMultiSelectedIds(new Set());
+          setSelectedId(nextDrag.id);
+        }
+        return;
+      }
       if (!selectionBox) return;
       const currentBox = selectionBoxRef.current ?? selectionBox;
       const nextBox = { ...currentBox, currentX: event.clientX, currentY: event.clientY };
@@ -318,6 +564,25 @@ export default function App() {
       setSelectedId(null);
     };
     const onUp = () => {
+      if (panDrag) {
+        const finalDrag = panDragRef.current ?? panDrag;
+        if (finalDrag.started) suppressCanvasClickRef.current = true;
+        panDragRef.current = null;
+        setPanDrag(null);
+        return;
+      }
+      if (nodeDrag) {
+        const finalDrag = nodeDragRef.current ?? nodeDrag;
+        if (finalDrag.started && finalDrag.targetId) {
+          moveNodeToParent(finalDrag.id, finalDrag.targetId);
+        } else if (finalDrag.started) {
+          reorderNodeAtPoint(finalDrag.id, finalDrag.currentY);
+        }
+        if (finalDrag.started) suppressCanvasClickRef.current = true;
+        nodeDragRef.current = null;
+        setNodeDrag(null);
+        return;
+      }
       if (!selectionBox) return;
       const finalBox = selectionBoxRef.current ?? selectionBox;
       const distance = Math.hypot(finalBox.currentX - finalBox.startX, finalBox.currentY - finalBox.startY);
@@ -339,7 +604,7 @@ export default function App() {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
-  }, [idsInSelectionBox, selectionBox]);
+  }, [applyView, idsInSelectionBox, moveNodeToParent, nearestNodeIdByDraggedCorner, nodeDrag, panDrag, reorderNodeAtPoint, selectionBox]);
 
   const selectedScreen = useMemo(() => {
     if (!selectedLayout || !canvasRef.current) return null;
@@ -363,6 +628,7 @@ export default function App() {
   }, [multiSelectedIds, view]);
 
   function appendChildren(targetId: string, children: MindmapNode[]) {
+    pushUndoSnapshot();
     const lastChild = children.at(-1);
     if (lastChild) pendingFocusNodeRef.current = lastChild.id;
     setMindmap((current) => {
@@ -372,6 +638,27 @@ export default function App() {
         root: updateNode(current.root, targetId, (node) => ({
           ...node,
           children: [...node.children, ...children]
+        }))
+      };
+    });
+    setCollapsedIds((current) => {
+      const next = new Set(current);
+      next.delete(targetId);
+      return next;
+    });
+  }
+
+  function replaceChildren(targetId: string, children: MindmapNode[]) {
+    pushUndoSnapshot();
+    const firstChild = children.at(0);
+    if (firstChild) pendingFocusNodeRef.current = firstChild.id;
+    setMindmap((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        root: updateNode(current.root, targetId, (node) => ({
+          ...node,
+          children
         }))
       };
     });
@@ -403,7 +690,7 @@ export default function App() {
     });
     try {
       const targetPath = pathToNode(mindmap.root, selected.id);
-      const result = await expandNode(mindmap, targetPath, mode, controller.signal);
+      const result = await expandNode(mindmap, targetPath, mode, aiRequestSettings, controller.signal);
       appendChildren(selected.id, result.children);
       addChat({
         role: "ai",
@@ -417,6 +704,53 @@ export default function App() {
         role: "system",
         title: "操作失败",
         text: err instanceof Error ? err.message : "操作失败，请稍后再试"
+      });
+    } finally {
+      if (activeRequestRef.current === controller) activeRequestRef.current = null;
+      setLoadingText("");
+    }
+  }
+
+  async function handleRegenerateAction() {
+    if (!mindmap || !selected) return;
+    if (selected.kind === "topic") {
+      await regenerate();
+      return;
+    }
+    if (selected.children.length === 0) return;
+    if (activeRequestRef.current) {
+      flash("AI 正在处理，先取消当前任务");
+      return;
+    }
+    const controller = new AbortController();
+    activeRequestRef.current = controller;
+    setLoadingText("正在优化子节点…");
+    addChat({
+      role: "thinking",
+      title: `优化「${selected.text}」的子节点`,
+      text: "我会保留有价值的信息，合并重复表达，并重构该节点下的分支。",
+      steps: [
+        `读取路径：${pathToNode(mindmap.root, selected.id).join(" > ")}`,
+        "梳理已有子节点的重复、空泛和层级问题",
+        "用更清晰的结构替换该节点下方子节点"
+      ]
+    });
+    try {
+      const targetPath = pathToNode(mindmap.root, selected.id);
+      const result = await rebuildNodeChildren(mindmap, targetPath, aiRequestSettings, controller.signal);
+      replaceChildren(selected.id, result.children);
+      addChat({
+        role: "ai",
+        title: "已优化子节点",
+        text: `我已重新整理「${selected.text}」下的 ${result.children.length} 个子节点。`
+      });
+    } catch (err) {
+      if (isAbortError(err)) return;
+      flash(err instanceof Error ? err.message : "优化失败，请稍后再试");
+      addChat({
+        role: "system",
+        title: "优化失败",
+        text: err instanceof Error ? err.message : "优化失败，请稍后再试"
       });
     } finally {
       if (activeRequestRef.current === controller) activeRequestRef.current = null;
@@ -441,12 +775,45 @@ export default function App() {
     flash("已新增子节点，可直接编辑内容");
   }
 
+  const addSiblingBelowSelected = useCallback(() => {
+    if (!mindmap || !selected) return;
+    if (selected.kind === "topic") {
+      flash("中心主题不能新增同级节点");
+      return;
+    }
+    const parentInfo = findParentInfo(mindmap.root, selected.id);
+    if (!parentInfo) return;
+    const currentIndex = parentInfo.parent.children.findIndex((child) => child.id === selected.id);
+    if (currentIndex < 0) return;
+    const sibling = createNode("新同级");
+    pushUndoSnapshot();
+    setMindmap({
+      ...mindmap,
+      root: updateNode(mindmap.root, parentInfo.parent.id, (node) => ({
+        ...node,
+        children: [
+          ...node.children.slice(0, currentIndex + 1),
+          sibling,
+          ...node.children.slice(currentIndex + 1)
+        ]
+      }))
+    });
+    setSelectedId(sibling.id);
+    setMultiSelectedIds(new Set());
+    setEditingId(sibling.id);
+    setEditingText(sibling.text);
+    selectEditTextRef.current = sibling.id;
+    setFocusedAddTarget(null);
+    pendingFocusNodeRef.current = sibling.id;
+  }, [flash, mindmap, pushUndoSnapshot, selected]);
+
   const deleteSelected = useCallback(() => {
     if (!mindmap || !selected) return;
     if (selected.kind === "topic") {
       flash("中心主题不能删除");
       return;
     }
+    pushUndoSnapshot();
     setMindmap({ ...mindmap, root: removeNode(mindmap.root, selected.id) });
     addChat({
       role: "system",
@@ -454,7 +821,7 @@ export default function App() {
       text: `已从脑图中删除「${selected.text}」。`
     });
     setSelectedId(null);
-  }, [addChat, flash, mindmap, selected]);
+  }, [addChat, flash, mindmap, pushUndoSnapshot, selected]);
 
   const deleteMultiSelected = useCallback(() => {
     if (!mindmap || multiSelectedIds.size === 0) return;
@@ -467,6 +834,7 @@ export default function App() {
       nextRoot = removeNode(nextRoot, id);
     });
     if (labels.length === 0) return;
+    pushUndoSnapshot();
     setMindmap({ ...mindmap, root: nextRoot });
     setMultiSelectedIds(new Set());
     setSelectedId(null);
@@ -475,11 +843,23 @@ export default function App() {
       title: "已批量删除节点",
       text: `已从脑图中删除 ${labels.length} 个节点。`
     });
-  }, [addChat, mindmap, multiSelectedIds]);
+  }, [addChat, mindmap, multiSelectedIds, pushUndoSnapshot]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z" && !event.shiftKey) {
+        const editTarget = target?.closest("textarea.edit-input") as HTMLTextAreaElement | null;
+        if (editTarget && editingId) {
+          const currentNode = root ? findNode(root, editingId) : null;
+          if (currentNode && editTarget.value !== currentNode.text) return;
+        } else if (target?.closest("input, textarea, select, [contenteditable='true']")) {
+          return;
+        }
+        event.preventDefault();
+        undoLastStep();
+        return;
+      }
       if (target?.closest("input, textarea, select, [contenteditable='true']")) return;
       if (multiSelectedIds.size > 0 && (event.key === "Delete" || event.key === "Backspace")) {
         event.preventDefault();
@@ -492,6 +872,11 @@ export default function App() {
         addManualChild();
         return;
       }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        addSiblingBelowSelected();
+        return;
+      }
       if (event.key === "Delete" || event.key === "Backspace") {
         event.preventDefault();
         deleteSelected();
@@ -499,7 +884,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [addManualChild, deleteMultiSelected, deleteSelected, multiSelectedIds, selected]);
+  }, [addManualChild, addSiblingBelowSelected, deleteMultiSelected, deleteSelected, editingId, multiSelectedIds, root, selected, undoLastStep]);
 
   async function submitDockText() {
     const text = dockText.trim();
@@ -517,6 +902,7 @@ export default function App() {
     });
     if (!target) {
       const branch = createNode(text);
+      pushUndoSnapshot();
       setMindmap({ ...mindmap, root: { ...mindmap.root, children: [...mindmap.root.children, branch] } });
       addChat({
         role: "ai",
@@ -541,7 +927,7 @@ export default function App() {
     });
     try {
       const targetPath = pathToNode(mindmap.root, target.id);
-      const result = await respondToNode(mindmap, targetPath, text, controller.signal);
+      const result = await respondToNode(mindmap, targetPath, text, aiRequestSettings, controller.signal);
       appendChildren(target.id, result.nodes);
       flash("AI 已完善该节点");
       addChat({
@@ -567,7 +953,9 @@ export default function App() {
   function commitEdit(id: string) {
     const nextText = editingText.trim();
     if (!mindmap) return;
-    if (nextText) {
+    const currentNode = findNode(mindmap.root, id);
+    if (nextText && currentNode && currentNode.text !== nextText) {
+      pushUndoSnapshot();
       setMindmap({ ...mindmap, root: updateNode(mindmap.root, id, (node) => ({ ...node, text: nextText })) });
     }
     setEditingId(null);
@@ -660,6 +1048,7 @@ export default function App() {
   }
 
   function reset() {
+    pushUndoSnapshot();
     setMindmap(null);
     setTopic("");
     setHeroText("");
@@ -675,6 +1064,7 @@ export default function App() {
   }
 
   function openRecord(record: MindmapRecord) {
+    pushUndoSnapshot();
     shouldFitOnMindmapChangeRef.current = true;
     setActiveRecordId(record.id);
     setMindmap(record.mindmap);
@@ -704,8 +1094,27 @@ export default function App() {
     flash("记录已删除");
   }
 
+  function savePromptSettings() {
+    saveAiPrompt(aiPrompt);
+    setPromptOpen(false);
+    flash(aiPrompt.trim() ? "Prompt 已保存" : "已恢复默认 Prompt");
+  }
+
+  function saveModelSettings() {
+    saveAiModelConfig(aiModelConfig);
+    setModelOpen(false);
+    flash("Model 已保存");
+  }
+
+  function resetModelSettings() {
+    setAiModelConfig(DEFAULT_MODEL_CONFIG);
+    saveAiModelConfig(DEFAULT_MODEL_CONFIG);
+    flash("已恢复默认 Model");
+  }
+
   function collapseAllNodes() {
     if (!root) return;
+    pushUndoSnapshot();
     const next = new Set<string>();
     walkNodes(root, (node) => {
       if (node.children.length > 0) next.add(node.id);
@@ -714,6 +1123,7 @@ export default function App() {
   }
 
   function expandAllNodes() {
+    pushUndoSnapshot();
     setCollapsedIds(new Set());
   }
 
@@ -725,7 +1135,7 @@ export default function App() {
     <>
       <div className={`topbar ${mindmap ? "" : "hidden"}`}>
         <button className="logo logo-button" onClick={reset}>
-          <span className="logo-dot" />
+          <MindmapIcon className="mindmap-mark mindmap-mark-small" />
           理清
         </button>
         {mindmap && (
@@ -749,23 +1159,20 @@ export default function App() {
             </div>
           </div>
         )}
-        <label className="search-switch search-switch-top">
-          <input
-            type="checkbox"
-            checked={webSearchEnabled}
-            onChange={(event) => setWebSearchEnabled(event.target.checked)}
-          />
-          <span>联网搜索</span>
-        </label>
-        <div className="topic-text">{mindmap?.root.text ? `“${mindmap.root.text}”` : ""}</div>
+        <div className="detail-title">
+          <div className="topic-text">{mindmap?.root.text || ""}</div>
+          {detailStats && (
+            <div className="topic-meta">
+              <span>{detailStats.branchCount} 个主分支</span>
+              <span>{detailStats.nodeCount} 个节点</span>
+            </div>
+          )}
+        </div>
         <div className="spacer" />
-        <button className="tbtn" onClick={exportImage}>⬇ 导出图片</button>
-        <button className="tbtn" onClick={copyPlantUML}>⧉ 复制 PlantUML</button>
-        <button className="tbtn" disabled={Boolean(loadingText)} onClick={() => void regenerate()}>⟲ 重新生成</button>
-        <button className="tbtn" onClick={() => setFocusMode((value) => !value)}>
-          {focusMode ? "展开记录" : "专注脑图"}
-        </button>
-        <button className="tbtn" onClick={reset}>＋ 理清新事</button>
+        <div className="topbar-actions">
+          <button className="tbtn" onClick={exportImage}>⬇ 导出图片</button>
+          <button className="tbtn" onClick={copyPlantUML}>⧉ 复制 PlantUML</button>
+        </div>
       </div>
 
       {mindmap && !focusMode && (
@@ -775,7 +1182,16 @@ export default function App() {
               <div className="chat-title">共创记录</div>
               <div className="chat-subtitle">和 AI 一起完善右侧脑图</div>
             </div>
-            <span className="chat-type">{TYPE_LABELS[mindmap.type]}</span>
+            <div className="chat-head-actions">
+              <button
+                className="chat-focus-toggle"
+                onClick={() => setFocusMode(true)}
+                title="专注脑图"
+                aria-label="专注脑图"
+              >
+                ⤢
+              </button>
+            </div>
           </div>
 
           <div className="chat-list" ref={chatListRef}>
@@ -840,7 +1256,7 @@ export default function App() {
 
       <div
         ref={canvasRef}
-        className={`canvas ${mindmap && !focusMode ? "canvas-with-panel" : ""} ${selectionBox ? "selecting" : ""}`}
+        className={`canvas ${mindmap ? "canvas-detail" : ""} ${mindmap && !focusMode ? "canvas-with-panel" : ""} ${selectionBox ? "selecting" : ""}`}
         onClick={() => {
           if (suppressCanvasClickRef.current) {
             suppressCanvasClickRef.current = false;
@@ -891,12 +1307,17 @@ export default function App() {
           <svg className="edges">
             <g>
               {layout?.edges.map((edge) => {
+                const previewParent = nodeDrag?.started && nodeDrag.targetId && edge.to.id === nodeDrag.id
+                  ? layout.nodes.get(nodeDrag.targetId)
+                  : null;
+                const from = renderedLayoutNode(previewParent ?? edge.from, draggedNodeIds, dragDelta);
+                const to = renderedLayoutNode(edge.to, draggedNodeIds, dragDelta);
                 return (
                   <path
                     key={`${edge.from.id}-${edge.to.id}`}
                     className="edge show"
                     style={{ animationDelay: `${edge.to.depth * 70}ms` }}
-                    d={elbowEdgePath(edge.from.x, edge.from.y, edge.to.x, edge.to.y)}
+                    d={elbowEdgePath(from.x, from.y, to.x, to.y)}
                   />
                 );
               })}
@@ -906,14 +1327,18 @@ export default function App() {
             {nodes.map((node) => {
               const point = layout?.nodes.get(node.id);
               if (!point) return null;
-                  const isSelected = selectedId === node.id;
-                  const isMultiSelected = multiSelectedIds.has(node.id);
+              const isSelected = selectedId === node.id;
+              const isMultiSelected = multiSelectedIds.has(node.id);
+              const isDraggingNode = nodeDrag?.id === node.id && nodeDrag.started;
+              const isDropTarget = nodeDrag?.targetId === node.id;
+              const nodeStyle = draggedNodeIds.has(node.id) ? draggedNodeStyle(point.x, point.y, dragDelta) : { left: point.x, top: point.y };
               const hasKids = node.children.length > 0;
               const isCollapsed = collapsedIds.has(node.id);
               return (
                 <div
                   key={node.id}
                   ref={(el) => { nodeRefs.current[node.id] = el; }}
+                  data-node-id={node.id}
                   className={[
                     "node",
                     "show",
@@ -921,11 +1346,13 @@ export default function App() {
                     point.depth === 1 ? "d1" : "",
                     isSelected ? "sel" : "",
                     isMultiSelected ? "multi-sel" : "",
+                    isDraggingNode ? "dragging-node" : "",
+                    isDropTarget ? "drop-target" : "",
                     editingId === node.id ? "editing" : "",
                     hasKids ? "haskids" : "",
                     isCollapsed ? "collapsed" : ""
                   ].filter(Boolean).join(" ")}
-                  style={{ left: point.x, top: point.y, animationDelay: `${point.depth * 70}ms` }}
+                  style={{ ...nodeStyle, animationDelay: `${point.depth * 70}ms` }}
                   onClick={(event) => {
                     event.stopPropagation();
                     if (suppressCanvasClickRef.current) {
@@ -936,11 +1363,39 @@ export default function App() {
                     setSelectedId(node.id);
                   }}
                   onMouseDown={(event) => {
-                    if (node.kind !== "topic" || editingId === node.id) return;
-                    if ((event.target as HTMLElement).closest(".badge, input")) return;
+                    if (editingId === node.id) return;
+                    if ((event.target as HTMLElement).closest(".badge, input, textarea")) return;
                     event.stopPropagation();
+                    (document.activeElement as HTMLElement | null)?.blur();
                     setMultiSelectedIds(new Set());
                     setSelectedId(node.id);
+                    if (node.kind === "topic") {
+                      const nextPanDrag: PanDrag = {
+                        startX: event.clientX,
+                        startY: event.clientY,
+                        currentX: event.clientX,
+                        currentY: event.clientY,
+                        startView: viewRef.current,
+                        started: false
+                      };
+                      panDragRef.current = nextPanDrag;
+                      setPanDrag(nextPanDrag);
+                      return;
+                    }
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    const nextDrag: NodeDrag = {
+                      id: node.id,
+                      startX: event.clientX,
+                      startY: event.clientY,
+                      currentX: event.clientX,
+                      currentY: event.clientY,
+                      grabOffsetX: event.clientX - rect.left,
+                      grabOffsetY: event.clientY - rect.top,
+                      started: false,
+                      targetId: null
+                    };
+                    nodeDragRef.current = nextDrag;
+                    setNodeDrag(nextDrag);
                   }}
                   onDoubleClick={(event) => {
                     event.stopPropagation();
@@ -954,14 +1409,10 @@ export default function App() {
                         className="edit-input"
                         value={editingText}
                         autoFocus
-                        rows={Math.min(6, Math.max(2, editingText.split("\n").length))}
+                        style={{ width: editTextareaWidth(editingText) }}
+                        rows={editTextareaRows(editingText)}
                         onClick={(event) => event.stopPropagation()}
-                        onFocus={(event) => {
-                          if (selectEditTextRef.current === node.id) {
-                            event.currentTarget.select();
-                            selectEditTextRef.current = null;
-                          }
-                        }}
+                        onFocus={(event) => event.stopPropagation()}
                         onChange={(event) => setEditingText(event.target.value)}
                         onBlur={() => commitEdit(node.id)}
                         onKeyDown={(event) => {
@@ -983,6 +1434,7 @@ export default function App() {
                             className={`badge ${isCollapsed ? "plus" : "minus"}`}
                             onClick={(event) => {
                               event.stopPropagation();
+                              pushUndoSnapshot();
                               setCollapsedIds((current) => {
                                 const next = new Set(current);
                                 if (next.has(node.id)) next.delete(node.id);
@@ -1005,17 +1457,25 @@ export default function App() {
         {selectionBox && <div className="selection-box" style={selectionBoxStyle(selectionBox)} />}
       </div>
 
-      {multiSelectedCount > 1 && selectionBox === null && multiActionbarScreen && (
+      {!loadingText && multiSelectedCount > 1 && selectionBox === null && multiActionbarScreen && (
         <div className="actionbar show multi-actionbar" style={{ left: multiActionbarScreen.x, top: multiActionbarScreen.y - 14 }}>
           <button className="danger" onClick={deleteMultiSelected}>✕ 删除 {multiSelectedCount} 个</button>
         </div>
       )}
 
-      {selected && selectedScreen && (
+      {!loadingText && selected && selectedScreen && (
         <div className="actionbar show" style={{ left: selectedScreen.x, top: selectedScreen.y - 30 * view.s - 14 }}>
-          <button disabled={Boolean(loadingText)} onClick={() => void handleExpand("dig")}>⤵ 深挖</button>
-          <button disabled={Boolean(loadingText)} onClick={() => void handleExpand("ask")}>？ 追问</button>
+          <button onClick={() => void handleExpand("dig")}>⤵ 深挖</button>
+          <button onClick={() => void handleExpand("ask")}>？ 追问</button>
           <button onClick={addManualChild}>＋ 补充</button>
+          {(selected.kind === "topic" || selected.children.length > 0) && (
+            <>
+              <span className="sep" />
+              <button onClick={() => void handleRegenerateAction()}>
+                {selected.kind === "topic" ? "↻ 重新生成整图" : "↻ 优化子节点"}
+              </button>
+            </>
+          )}
           <span className="sep" />
           <button className="danger" onClick={deleteSelected}>✕ 删除</button>
         </div>
@@ -1024,21 +1484,25 @@ export default function App() {
       {mindmap && focusMode && (
         <div className="mini-composer">
           <button className="mini-history" onClick={() => setFocusMode(false)}>共创记录</button>
-          <div className="mini-context">
-            {multiSelectedCount > 1 ? `已选择 ${multiSelectedCount} 个节点` : selected ? `针对：${selected.text}` : "追加新分支"}
+          <div className="mini-input-stack">
+            {(multiSelectedCount > 1 || selected) && (
+              <div className="mini-context">
+                {multiSelectedCount > 1 ? `已选择 ${multiSelectedCount} 个节点` : `针对：${selected?.text}`}
+              </div>
+            )}
+            <textarea
+              value={dockText}
+              disabled={multiSelectedCount > 1}
+              placeholder={multiSelectedCount > 1 ? "已多选节点，只能删除…" : selected ? "输入问题或补充…" : "追加新分支…"}
+              onChange={(event) => setDockText(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  void submitDockText();
+                }
+              }}
+            />
           </div>
-          <textarea
-            value={dockText}
-            disabled={multiSelectedCount > 1}
-            placeholder={multiSelectedCount > 1 ? "已多选节点，只能删除…" : selected ? "输入问题或补充…" : "追加新分支…"}
-            onChange={(event) => setDockText(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                void submitDockText();
-              }
-            }}
-          />
           <button className="send" disabled={multiSelectedCount > 1 || !dockText.trim()} onClick={() => void submitDockText()}>↑</button>
         </div>
       )}
@@ -1061,7 +1525,10 @@ export default function App() {
       </div>
 
       <div className={`hero ${mindmap ? "gone" : ""}`}>
-        <div className="hero-logo">理清<span /></div>
+        <div className="hero-logo">
+          <MindmapIcon className="mindmap-mark mindmap-mark-large" />
+          <span className="hero-logo-text">理清</span>
+        </div>
         <div className="hero-sub">把一团模糊的事，一句话交给 AI，理成一张看得清的脑图</div>
         <div className="hero-workbench">
           <div className="hero-input-area">
@@ -1073,7 +1540,7 @@ export default function App() {
                   onChange={(event) => setHeroType(event.target.value ? event.target.value as MindmapType : null)}
                   aria-label="理清类型"
                 >
-                  <option value="">自动判断</option>
+                  <option value="">AI识别</option>
                   {mindmapTypes.map((type) => (
                     <option key={type} value={type}>{TYPE_LABELS[type]}</option>
                   ))}
@@ -1092,16 +1559,14 @@ export default function App() {
               </div>
             </div>
             <div className="hero-tools">
-              <label className="search-switch">
-                <input
-                  type="checkbox"
-                  checked={webSearchEnabled}
-                  onChange={(event) => setWebSearchEnabled(event.target.checked)}
-                />
-                <span>联网搜索</span>
-              </label>
               <button className="records-entry" onClick={() => setRecordsOpen(true)}>
                 理清记录
+              </button>
+              <button className="records-entry" onClick={() => setPromptOpen(true)}>
+                Prompt
+              </button>
+              <button className="records-entry" onClick={() => setModelOpen(true)}>
+                Model
               </button>
             </div>
           </div>
@@ -1114,7 +1579,6 @@ export default function App() {
             <div className="records-head">
               <div>
                 <div className="records-title">理清记录</div>
-                <div className="records-subtitle">按最后更新时间倒序排列</div>
               </div>
               <button className="records-close" onClick={() => setRecordsOpen(false)} aria-label="关闭">×</button>
             </div>
@@ -1126,24 +1590,102 @@ export default function App() {
                   <div key={record.id} className="record-row">
                     <button className="record-open" onClick={() => openRecord(record)}>
                       <span className="record-main">
-                        <span className="record-title">{record.title}</span>
-                        <span className="record-meta">{record.mindmap.root.children.length} 个主分支</span>
-                      </span>
-                      <span className="record-side">
-                        <span className="record-type">{TYPE_LABELS[record.type]}</span>
-                        <span className="record-time">{formatRecordTime(record.updatedAt)}</span>
+                        <span className="record-title-line">
+                          <span className="record-type">{TYPE_LABELS[record.type]}</span>
+                          <span className="record-title">{record.title}</span>
+                        </span>
+                        <span className="record-meta">
+                          <span>{record.mindmap.root.children.length} 个主分支</span>
+                          <span className="record-time">{formatRecordTime(record.updatedAt)}</span>
+                        </span>
                       </span>
                     </button>
                     <button
                       className="record-delete"
                       onClick={() => setDeleteConfirmRecord(record)}
                       aria-label={`删除记录：${record.title}`}
+                      title="删除记录"
                     >
-                      删除
+                      ×
                     </button>
                   </div>
                 ))
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {promptOpen && (
+        <div className="settings-modal" onClick={() => setPromptOpen(false)}>
+          <div className="settings-dialog" onClick={(event) => event.stopPropagation()}>
+            <div className="settings-head">
+              <div>
+                <div className="settings-title">Prompt</div>
+                <div className="settings-subtitle">留空时使用系统默认 Prompt；填写后会优先采用你的要求，并保留兜底结构约束。</div>
+              </div>
+              <button className="records-close" onClick={() => setPromptOpen(false)} aria-label="关闭">×</button>
+            </div>
+            <textarea
+              className="settings-textarea"
+              value={aiPrompt}
+              placeholder="写下你希望 AI 理清时遵循的个人偏好，例如：先拆利益相关方，再拆风险和验证方式。"
+              onChange={(event) => setAiPrompt(event.target.value)}
+            />
+            <div className="settings-actions">
+              <button onClick={() => setAiPrompt("")}>恢复默认</button>
+              <button className="primary" onClick={savePromptSettings}>保存</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {modelOpen && (
+        <div className="settings-modal" onClick={() => setModelOpen(false)}>
+          <div className="settings-dialog settings-dialog-narrow" onClick={(event) => event.stopPropagation()}>
+            <div className="settings-head">
+              <div>
+                <div className="settings-title">Model</div>
+                <div className="settings-subtitle">配置保存在本机浏览器。留空则继续使用服务端默认 DeepSeek 配置。</div>
+              </div>
+              <button className="records-close" onClick={() => setModelOpen(false)} aria-label="关闭">×</button>
+            </div>
+            <label className="settings-field">
+              <span>模型厂商</span>
+              <input
+                value={aiModelConfig.provider}
+                placeholder="DeepSeek"
+                onChange={(event) => setAiModelConfig((current) => ({ ...current, provider: event.target.value }))}
+              />
+            </label>
+            <label className="settings-field">
+              <span>模型</span>
+              <input
+                value={aiModelConfig.model}
+                placeholder="deepseek-v4-pro"
+                onChange={(event) => setAiModelConfig((current) => ({ ...current, model: event.target.value }))}
+              />
+            </label>
+            <label className="settings-field">
+              <span>URL</span>
+              <input
+                value={aiModelConfig.baseUrl}
+                placeholder="https://api.deepseek.com"
+                onChange={(event) => setAiModelConfig((current) => ({ ...current, baseUrl: event.target.value }))}
+              />
+            </label>
+            <label className="settings-field">
+              <span>Key</span>
+              <input
+                type="password"
+                value={aiModelConfig.apiKey}
+                placeholder="sk-..."
+                onChange={(event) => setAiModelConfig((current) => ({ ...current, apiKey: event.target.value }))}
+              />
+            </label>
+            <div className="settings-actions">
+              <button onClick={resetModelSettings}>恢复默认</button>
+              <button className="primary" onClick={saveModelSettings}>保存</button>
             </div>
           </div>
         </div>
@@ -1179,6 +1721,21 @@ function labelForKind(kind: MindmapNode["kind"]) {
   if (kind === "user_question") return "你问";
   if (kind === "ai_answer") return "AI 答";
   return "";
+}
+
+function MindmapIcon({ className }: { className: string }) {
+  return (
+    <svg className={className} viewBox="0 0 48 40" aria-hidden="true" focusable="false">
+      <rect className="mark-root" x="3" y="12" width="14" height="14" rx="3" />
+      <path className="mark-branch" d="M17 20h12" />
+      <path className="mark-branch" d="M29 20V9c0-3 2-5 5-5h3" />
+      <path className="mark-branch" d="M29 20h8" />
+      <path className="mark-branch" d="M29 20v11c0 3 2 5 5 5h3" />
+      <rect className="mark-child" x="37" y="2" width="8" height="8" rx="2.5" />
+      <rect className="mark-child" x="37" y="16" width="8" height="8" rx="2.5" />
+      <rect className="mark-child" x="37" y="30" width="8" height="8" rx="2.5" />
+    </svg>
+  );
 }
 
 function isAbortError(error: unknown) {
@@ -1238,4 +1795,81 @@ function selectionBoxStyle(box: SelectionBox) {
   const width = Math.abs(box.currentX - box.startX);
   const height = Math.abs(box.currentY - box.startY);
   return { left, top, width, height };
+}
+
+function dragDeltaInWorld(drag: NodeDrag, view: ViewState) {
+  const dx = (drag.currentX - drag.startX) / view.s;
+  const dy = (drag.currentY - drag.startY) / view.s;
+  return { dx, dy };
+}
+
+function renderedLayoutNode(node: LayoutNode, draggedIds: Set<string>, delta: { dx: number; dy: number } | null): LayoutNode {
+  if (!delta || !draggedIds.has(node.id)) return node;
+  return {
+    ...node,
+    x: node.x + delta.dx,
+    y: node.y + delta.dy
+  };
+}
+
+function draggedNodeStyle(x: number, y: number, delta: { dx: number; dy: number } | null) {
+  return {
+    left: x + (delta?.dx ?? 0),
+    top: y + (delta?.dy ?? 0)
+  };
+}
+
+function distanceToRect(x: number, y: number, rect: DOMRect) {
+  const dx = x < rect.left ? rect.left - x : x > rect.right ? x - rect.right : 0;
+  const dy = y < rect.top ? rect.top - y : y > rect.bottom ? y - rect.bottom : 0;
+  return Math.hypot(dx, dy);
+}
+
+function editTextareaWidth(text: string) {
+  const longestLine = Math.max(6, ...text.split("\n").map((line) => Array.from(line).length));
+  return `${Math.min(44, Math.max(12, longestLine + 2))}ch`;
+}
+
+function editTextareaRows(text: string) {
+  return Math.min(6, Math.max(1, text.split("\n").length));
+}
+
+function isDescendant(root: MindmapNode, ancestorId: string, candidateId: string) {
+  const ancestor = findNode(root, ancestorId);
+  if (!ancestor) return false;
+  return Boolean(findNodeInChildren(ancestor, candidateId));
+}
+
+function findNodeInChildren(node: MindmapNode, id: string): MindmapNode | null {
+  for (const child of node.children) {
+    if (child.id === id) return child;
+    const found = findNodeInChildren(child, id);
+    if (found) return found;
+  }
+  return null;
+}
+
+function findParentInfo(root: MindmapNode, id: string): { parent: MindmapNode; node: MindmapNode } | null {
+  for (const child of root.children) {
+    if (child.id === id) return { parent: root, node: child };
+    const found = findParentInfo(child, id);
+    if (found) return found;
+  }
+  return null;
+}
+
+function cloneMindmap(mindmap: Mindmap): Mindmap {
+  return {
+    type: mindmap.type,
+    root: cloneMindmapNode(mindmap.root)
+  };
+}
+
+function cloneMindmapNode(node: MindmapNode): MindmapNode {
+  return {
+    id: node.id,
+    text: node.text,
+    kind: node.kind,
+    children: node.children.map(cloneMindmapNode)
+  };
 }

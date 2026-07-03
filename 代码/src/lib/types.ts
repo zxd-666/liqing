@@ -42,9 +42,9 @@ export type ExpandMode = "dig" | "ask";
 export type MessageJudgement = "question" | "supplement";
 
 export const TYPE_LABELS: Record<MindmapType, string> = {
-  decision: "决策",
+  decision: "做决策",
   cause: "找根因",
-  concept: "搞懂概念",
+  concept: "理概念",
   plan: "做规划"
 };
 

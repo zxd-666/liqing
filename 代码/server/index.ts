@@ -3,7 +3,7 @@ import type { Request, Response } from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { expandMindmapNode, generateMindmap, respondToNode } from "./deepseek.js";
+import { expandMindmapNode, generateMindmap, rebuildMindmapNodeChildren, respondToNode } from "./deepseek.js";
 import { loadDotEnv } from "./env.js";
 import { mindmapTypeSchema, normalizeMindmap, rawMindmapSchema } from "./schema.js";
 
@@ -19,19 +19,52 @@ app.use(express.json({ limit: "1mb" }));
 const generateBodySchema = z.object({
   text: z.string().min(1),
   forcedType: mindmapTypeSchema.optional(),
-  webSearch: z.boolean().optional()
+  webSearch: z.boolean().optional(),
+  prompt: z.string().optional(),
+  modelConfig: z.object({
+    provider: z.string().optional(),
+    model: z.string().optional(),
+    baseUrl: z.string().optional(),
+    apiKey: z.string().optional()
+  }).optional()
 });
 
 const expandBodySchema = z.object({
   mindmap: rawMindmapSchema,
   targetPath: z.array(z.string()).min(1),
-  mode: z.enum(["dig", "ask"])
+  mode: z.enum(["dig", "ask"]),
+  prompt: z.string().optional(),
+  modelConfig: z.object({
+    provider: z.string().optional(),
+    model: z.string().optional(),
+    baseUrl: z.string().optional(),
+    apiKey: z.string().optional()
+  }).optional()
+});
+
+const rebuildChildrenBodySchema = z.object({
+  mindmap: rawMindmapSchema,
+  targetPath: z.array(z.string()).min(1),
+  prompt: z.string().optional(),
+  modelConfig: z.object({
+    provider: z.string().optional(),
+    model: z.string().optional(),
+    baseUrl: z.string().optional(),
+    apiKey: z.string().optional()
+  }).optional()
 });
 
 const respondBodySchema = z.object({
   mindmap: rawMindmapSchema,
   targetPath: z.array(z.string()).min(1),
-  message: z.string().min(1)
+  message: z.string().min(1),
+  prompt: z.string().optional(),
+  modelConfig: z.object({
+    provider: z.string().optional(),
+    model: z.string().optional(),
+    baseUrl: z.string().optional(),
+    apiKey: z.string().optional()
+  }).optional()
 });
 
 function toHttpError(err: unknown) {
@@ -67,6 +100,8 @@ app.post("/api/generate", async (req, res) => {
       text: body.text.trim(),
       forcedType: body.forcedType,
       webSearch: body.webSearch,
+      prompt: body.prompt,
+      modelConfig: body.modelConfig,
       signal
     });
     if (!signal.aborted) res.json(mindmap);
@@ -84,6 +119,27 @@ app.post("/api/expand", async (req, res) => {
     const children = await expandMindmapNode({
       ...body,
       mindmap: normalizeMindmap(body.mindmap),
+      prompt: body.prompt,
+      modelConfig: body.modelConfig,
+      signal
+    });
+    if (!signal.aborted) res.json({ children });
+  } catch (err) {
+    if (isAbortError(err)) return;
+    const http = toHttpError(err);
+    res.status(http.status).json({ error: http.message });
+  }
+});
+
+app.post("/api/rebuild-children", async (req, res) => {
+  const signal = requestAbortSignal(req, res);
+  try {
+    const body = rebuildChildrenBodySchema.parse(req.body);
+    const children = await rebuildMindmapNodeChildren({
+      ...body,
+      mindmap: normalizeMindmap(body.mindmap),
+      prompt: body.prompt,
+      modelConfig: body.modelConfig,
       signal
     });
     if (!signal.aborted) res.json({ children });
@@ -101,6 +157,8 @@ app.post("/api/respond", async (req, res) => {
     const result = await respondToNode({
       ...body,
       mindmap: normalizeMindmap(body.mindmap),
+      prompt: body.prompt,
+      modelConfig: body.modelConfig,
       signal
     });
     if (!signal.aborted) res.json(result);
