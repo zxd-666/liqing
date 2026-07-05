@@ -41,6 +41,90 @@ type PanDrag = {
 
 const mindmapTypes: MindmapType[] = ["decision", "cause", "concept", "plan"];
 const DEFAULT_ROOT_OFFSET_X = -600;
+const heroTypeIcons: Record<MindmapType, MiniIconName> = {
+  decision: "decision",
+  cause: "target",
+  concept: "bulb",
+  plan: "route"
+};
+
+type MiniIconName = "sparkle" | "clock" | "prompt" | "model" | "decision" | "target" | "bulb" | "route" | "plus";
+
+function MiniIcon({ name }: { name: MiniIconName }) {
+  if (name === "sparkle") {
+    return (
+      <svg className="mini-icon" viewBox="0 0 20 20" aria-hidden="true">
+        <path d="M8.4 2.8 9.6 6l3.2 1.2-3.2 1.2-1.2 3.2-1.2-3.2L4 7.2 7.2 6l1.2-3.2Z" />
+        <path d="M14.2 10.8 15 13l2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2Z" />
+      </svg>
+    );
+  }
+  if (name === "decision") {
+    return (
+      <svg className="mini-icon" viewBox="0 0 20 20" aria-hidden="true">
+        <path d="M5 5.2h4.2a3.6 3.6 0 0 1 3.6 3.6v5.7" />
+        <path d="M12.8 8.8h3.4" />
+        <path d="m14.7 12.7 2 2 3-3" transform="translate(-2.2 .2)" />
+      </svg>
+    );
+  }
+  if (name === "target") {
+    return (
+      <svg className="mini-icon" viewBox="0 0 20 20" aria-hidden="true">
+        <circle cx="10" cy="10" r="6.4" />
+        <circle cx="10" cy="10" r="3" />
+        <path d="M10 2.8v2.1M10 15.1v2.1M2.8 10h2.1M15.1 10h2.1" />
+      </svg>
+    );
+  }
+  if (name === "bulb") {
+    return (
+      <svg className="mini-icon" viewBox="0 0 20 20" aria-hidden="true">
+        <path d="M6.2 8.4a3.8 3.8 0 1 1 7.6 0c0 1.5-.8 2.5-1.7 3.3-.5.5-.8 1-.8 1.7H8.7c0-.7-.3-1.2-.8-1.7-.9-.8-1.7-1.8-1.7-3.3Z" />
+        <path d="M8.6 15.2h2.8M9 17h2" />
+      </svg>
+    );
+  }
+  if (name === "route") {
+    return (
+      <svg className="mini-icon" viewBox="0 0 20 20" aria-hidden="true">
+        <circle cx="5.2" cy="5.5" r="2" />
+        <circle cx="14.8" cy="14.5" r="2" />
+        <path d="M7.2 5.5h4.3a2.4 2.4 0 0 1 0 4.8H8.6a2.2 2.2 0 0 0 0 4.4h4.2" />
+      </svg>
+    );
+  }
+  if (name === "plus") {
+    return (
+      <svg className="mini-icon" viewBox="0 0 20 20" aria-hidden="true">
+        <path d="M10 4.5v11M4.5 10h11" />
+        <path d="M14.6 4.9 16 3.5M15.3 7.1h2M12.4 4.2V2.5" />
+      </svg>
+    );
+  }
+  if (name === "clock") {
+    return (
+      <svg className="mini-icon" viewBox="0 0 20 20" aria-hidden="true">
+        <circle cx="10" cy="10" r="7" />
+        <path d="M10 5.8v4.4l3 1.8" />
+      </svg>
+    );
+  }
+  if (name === "prompt") {
+    return (
+      <svg className="mini-icon" viewBox="0 0 20 20" aria-hidden="true">
+        <path d="M5.2 5.3h9.6a2 2 0 0 1 2 2v5.1a2 2 0 0 1-2 2H9.4L5.5 17v-2.6h-.3a2 2 0 0 1-2-2V7.3a2 2 0 0 1 2-2Z" />
+        <path d="M7.3 9.6h.1M10 9.6h.1M12.7 9.6h.1" />
+      </svg>
+    );
+  }
+  return (
+    <svg className="mini-icon" viewBox="0 0 20 20" aria-hidden="true">
+      <path d="m10 3.4 5.6 3.1v6.9L10 16.6l-5.6-3.2V6.5L10 3.4Z" />
+      <path d="M4.7 6.7 10 9.8l5.3-3.1M10 9.8v6.4" />
+    </svg>
+  );
+}
 
 export default function App() {
   const [mindmap, setMindmap] = useState<Mindmap | null>(null);
@@ -58,6 +142,7 @@ export default function App() {
   const [loadingText, setLoadingText] = useState("");
   const [toast, setToast] = useState<Toast | null>(null);
   const [typeMenuOpen, setTypeMenuOpen] = useState(false);
+  const [heroTypeMenuOpen, setHeroTypeMenuOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   const [focusedAddTarget, setFocusedAddTarget] = useState<string | null>(null);
@@ -201,6 +286,13 @@ export default function App() {
     window.addEventListener("click", closeTypeMenu);
     return () => window.removeEventListener("click", closeTypeMenu);
   }, [typeMenuOpen]);
+
+  useEffect(() => {
+    if (!heroTypeMenuOpen) return;
+    const closeHeroTypeMenu = () => setHeroTypeMenuOpen(false);
+    window.addEventListener("click", closeHeroTypeMenu);
+    return () => window.removeEventListener("click", closeHeroTypeMenu);
+  }, [heroTypeMenuOpen]);
 
   useEffect(() => {
     const recordId = loadActiveRecordId();
@@ -1534,17 +1626,52 @@ export default function App() {
           <div className="hero-input-area">
             <div className="hero-input">
               <div className="dock-inner">
-                <select
-                  className="hero-type-select"
-                  value={heroType ?? ""}
-                  onChange={(event) => setHeroType(event.target.value ? event.target.value as MindmapType : null)}
-                  aria-label="理清类型"
-                >
-                  <option value="">AI识别</option>
-                  {mindmapTypes.map((type) => (
-                    <option key={type} value={type}>{TYPE_LABELS[type]}</option>
-                  ))}
-                </select>
+                <div className="hero-type-wrap" onClick={(event) => event.stopPropagation()}>
+                  <button
+                    type="button"
+                    className={`hero-type-pill ${heroTypeMenuOpen ? "open" : ""}`}
+                    onClick={() => setHeroTypeMenuOpen((value) => !value)}
+                    aria-haspopup="listbox"
+                    aria-expanded={heroTypeMenuOpen}
+                    aria-label="理清类型"
+                  >
+                    <MiniIcon name={heroType ? heroTypeIcons[heroType] : "sparkle"} />
+                    <span>{heroType ? TYPE_LABELS[heroType] : "AI识别"}</span>
+                  </button>
+                  <div className={`hero-type-menu ${heroTypeMenuOpen ? "open" : ""}`} role="listbox">
+                    <button
+                      type="button"
+                      className={!heroType ? "on" : ""}
+                      onClick={() => {
+                        setHeroType(null);
+                        setHeroTypeMenuOpen(false);
+                      }}
+                      role="option"
+                      aria-selected={!heroType}
+                    >
+                      <span className="hero-type-option-mark sparkle"><MiniIcon name="sparkle" /></span>
+                      <span>AI识别</span>
+                    </button>
+                    {mindmapTypes.map((type, index) => (
+                      <button
+                        key={type}
+                        type="button"
+                        className={heroType === type ? "on" : ""}
+                        onClick={() => {
+                          setHeroType(type);
+                          setHeroTypeMenuOpen(false);
+                        }}
+                        role="option"
+                        aria-selected={heroType === type}
+                      >
+                        <span className={`hero-type-option-mark tone-${index + 1}`}>
+                          <MiniIcon name={heroTypeIcons[type]} />
+                        </span>
+                        <span>{TYPE_LABELS[type]}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <input
                   value={heroText}
                   autoFocus
@@ -1554,18 +1681,26 @@ export default function App() {
                     if (event.key === "Enter") void runGenerate(heroText, heroType || undefined);
                   }}
                 />
-                <button className="send hero-ai-send" disabled={!heroText.trim() || Boolean(loadingText)} onClick={() => void runGenerate(heroText, heroType || undefined)}>AI</button>
-                <button className="hero-plus-send" disabled={!heroText.trim()} onClick={() => startBlankMindmap(heroText)}>＋</button>
+                <button className="send hero-ai-send" disabled={!heroText.trim() || Boolean(loadingText)} onClick={() => void runGenerate(heroText, heroType || undefined)}>
+                  <MiniIcon name="sparkle" />
+                  <span>AI</span>
+                </button>
+                <button className="hero-plus-send" disabled={!heroText.trim()} onClick={() => startBlankMindmap(heroText)} aria-label="创建空白脑图">
+                  <MiniIcon name="plus" />
+                </button>
               </div>
             </div>
             <div className="hero-tools">
               <button className="records-entry" onClick={() => setRecordsOpen(true)}>
+                <MiniIcon name="clock" />
                 理清记录
               </button>
               <button className="records-entry" onClick={() => setPromptOpen(true)}>
+                <MiniIcon name="prompt" />
                 Prompt
               </button>
               <button className="records-entry" onClick={() => setModelOpen(true)}>
+                <MiniIcon name="model" />
                 Model
               </button>
             </div>

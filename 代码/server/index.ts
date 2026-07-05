@@ -10,7 +10,7 @@ import { mindmapTypeSchema, normalizeMindmap, rawMindmapSchema } from "./schema.
 loadDotEnv();
 
 const app = express();
-const port = Number(process.env.PORT || 8787);
+const port = Number(process.env.PORT || 8797);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
 

@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "concurrently -k \"pnpm dev:server\" \"pnpm dev:client\"",
     "dev:client": "vite",
-    "dev:server": "tsx watch server/index.ts",
+    "dev:server": "PORT=8797 tsx watch server/index.ts",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b",
     "test": "vitest run",
