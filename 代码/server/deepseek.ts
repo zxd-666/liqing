@@ -41,6 +41,17 @@ export function modelTimeoutMessage(config?: AiModelConfig) {
   return `${request.provider}（${request.model}）在 45 秒内未响应：${request.endpoint}`;
 }
 
+export function modelRequestOptions(config?: AiModelConfig) {
+  const model = generateModel(config).toLowerCase();
+  if (model.startsWith("glm-5")) {
+    return {
+      thinking: { type: "disabled" as const },
+      max_tokens: 8192
+    };
+  }
+  return {};
+}
+
 function generateModel(config?: AiModelConfig) {
   return config?.model?.trim() || process.env.DEEPSEEK_MODEL_GENERATE || "deepseek-v4-pro";
 }
@@ -72,7 +83,8 @@ async function callDeepSeekJson(model: string, messages: ChatMessage[], signal?:
       model,
       messages,
       response_format: { type: "json_object" },
-      temperature: 0.4
+      temperature: 0.4,
+      ...modelRequestOptions(config)
     })
   }, signal, DEEPSEEK_TIMEOUT_MS, modelTimeoutMessage(config));
 
