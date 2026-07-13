@@ -28,6 +28,19 @@ function getApiUrl(config?: AiModelConfig) {
   return raw.endsWith("/chat/completions") ? raw : `${raw.replace(/\/+$/, "")}/chat/completions`;
 }
 
+export function describeModelRequest(config?: AiModelConfig) {
+  return {
+    provider: config?.provider?.trim() || "DeepSeek",
+    model: generateModel(config),
+    endpoint: getApiUrl(config)
+  };
+}
+
+export function modelTimeoutMessage(config?: AiModelConfig) {
+  const request = describeModelRequest(config);
+  return `${request.provider}（${request.model}）在 45 秒内未响应：${request.endpoint}`;
+}
+
 function generateModel(config?: AiModelConfig) {
   return config?.model?.trim() || process.env.DEEPSEEK_MODEL_GENERATE || "deepseek-v4-pro";
 }
@@ -46,6 +59,9 @@ export function assertDeepSeekConfigured(config?: AiModelConfig) {
 
 async function callDeepSeekJson(model: string, messages: ChatMessage[], signal?: AbortSignal, config?: AiModelConfig) {
   assertDeepSeekConfigured(config);
+  const request = describeModelRequest(config);
+  const startedAt = Date.now();
+  console.info("[AI] 请求开始", request);
   const res = await fetchWithTimeout(getApiUrl(config), {
     method: "POST",
     headers: {
@@ -58,7 +74,9 @@ async function callDeepSeekJson(model: string, messages: ChatMessage[], signal?:
       response_format: { type: "json_object" },
       temperature: 0.4
     })
-  }, signal, DEEPSEEK_TIMEOUT_MS, "AI 请求超时，请稍后重试");
+  }, signal, DEEPSEEK_TIMEOUT_MS, modelTimeoutMessage(config));
+
+  console.info("[AI] 收到响应", { ...request, status: res.status, elapsedMs: Date.now() - startedAt });
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -89,6 +107,14 @@ async function callWithRetry<T>(
     } catch (err) {
       if (isAbortError(err)) throw err;
       lastError = err;
+      const retryable = err instanceof TypeError;
+      console.warn("[AI] 请求失败", {
+        ...describeModelRequest(config),
+        attempt: attempt + 1,
+        willRetry: attempt === 0 && retryable,
+        error: err instanceof Error ? err.message : String(err)
+      });
+      if (!retryable) break;
     }
   }
   throw lastError instanceof Error ? lastError : new Error("DeepSeek 输出解析失败");
