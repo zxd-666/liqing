@@ -23,4 +23,15 @@ describe("server schema normalization", () => {
     expect(result.nodes[0].kind).toBe("node");
     expect(result.nodes[0].children[0].kind).toBe("node");
   });
+
+  it("falls back to a normal node when a model uses an unsupported detail kind", () => {
+    const mindmap = normalizeMindmap({
+      type: "plan",
+      root: {
+        text: "上线计划",
+        children: [{ text: "灰度验证", kind: "detail", children: [] }]
+      }
+    });
+    expect(mindmap.root.children[0].kind).toBe("node");
+  });
 });

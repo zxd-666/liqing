@@ -8,7 +8,7 @@ export const rawNodeSchema: z.ZodType<unknown> = z.lazy(() =>
   z.object({
     id: z.string().optional(),
     text: z.string().min(1),
-    kind: nodeKindSchema.optional(),
+    kind: z.string().optional(),
     children: z.array(rawNodeSchema).optional()
   })
 );
@@ -39,10 +39,13 @@ export function normalizeNode(raw: unknown, fallbackKind: NodeKind = "node"): Mi
   const parsed = rawNodeSchema.parse(raw) as {
     id?: string;
     text: string;
-    kind?: NodeKind;
+    kind?: string;
     children?: unknown[];
   };
-  const kind = parsed.kind && (fallbackKind === "topic" || parsed.kind !== "topic") ? parsed.kind : fallbackKind;
+  const candidate = nodeKindSchema.safeParse(parsed.kind);
+  const kind = candidate.success && (fallbackKind === "topic" || candidate.data !== "topic")
+    ? candidate.data
+    : fallbackKind;
   return {
     id: parsed.id || makeId(),
     text: normalizeText(parsed.text),
