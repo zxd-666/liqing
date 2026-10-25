@@ -1,63 +1,58 @@
-# 理清 · AI 脑图
+# 理清 · Liqing
 
-PC 网页端 AI 脑图 MVP。用户输入一句模糊问题后，后端调用 DeepSeek 生成结构化脑图，前端以右展开树展示，并支持节点深挖、追问、补充、编辑、折叠、导出 PNG 和复制 PlantUML。
+把一团模糊的事「理清」的 AI 脑图工具。输入一句模糊的问题，AI 自动判断类型并生成一张右展开树脑图，然后你可以点任意节点继续深挖、追问、补充——逐步把事情理清楚。
 
-## 本地启动
+```text
+一句话 → AI 生成整图 → 点节点深挖 / 追问 / 补充 → 理清
+```
+
+与 XMind 的区别：**AI 主动拆解**，不用从空白画布开始；与聊天的区别：输出是**可俯瞰的空间化脑图**，不是一屏屏滚走的文字。
+
+## 能用到什么程度（当前能力）
+
+实测通过的能力：
+
+- **一句话生成整图**：AI 自动判断 4 种类型（决策 / 找根因 / 搞懂概念 / 做规划），顶栏标签可手动纠正
+- **节点深挖**（`⤵`）与**追问**（围绕选中节点生成关联内容）
+- **补充信息**：在生成后追加补充，AI 融入已有结构
+- **编辑**：双击改节点文字、增删节点、拖拽移动节点换父级或排序
+- **折叠/展开**子树
+- **导出 PNG 图片**、**复制 PlantUML** 代码
+- **历史记录**：脑图存 localStorage，刷新不丢
+- **自定义模型**：设置面板可切换 provider / 模型 / baseUrl / API key（兼容 OpenAI 兼容接口，如 OpenRouter、GLM 系列），key 只存在你自己的浏览器 localStorage，由本机后端转发，不经过第三方服务器
+- **测试**：12 个单元测试覆盖 schema 归一化、PlantUML 生成、布局等核心逻辑
+
+MVP 边界（明确没做）：登录、多设备同步、协作、移动端。数据只存本机浏览器 localStorage。
+
+## 快速开始
+
+环境要求：Node.js ≥ 20，pnpm ≥ 10（实测 Node 22 / pnpm 11）。
 
 ```bash
 cd 代码
 pnpm install
-cp .env.example .env
-```
-
-在 `.env` 中填入：
-
-```bash
-DEEPSEEK_API_KEY=你的 DeepSeek API Key
-```
-
-启动开发环境：
-
-```bash
+cp .env.example .env   # .env 中填 DEEPSEEK_API_KEY
 pnpm dev
 ```
 
-- 前端：`http://127.0.0.1:5173`
-- 后端：`http://127.0.0.1:8797`
+打开 http://127.0.0.1:5173 即可使用。后端 API 在 http://127.0.0.1:8797（由 Vite 代理 `/api`）。
 
-## DeepSeek 配置
-
-默认模型：
-
-- 生成整图：`DEEPSEEK_MODEL_GENERATE=deepseek-v4-pro`
-- 轻任务：`DEEPSEEK_MODEL_LIGHT=deepseek-v4-flash`
-
-API key 只由 Node 后端读取，前端不会接触 key。未配置 key 时，前端会显示“未配置 DeepSeek API key”的错误。
+API key 获取：[DeepSeek 开放平台](https://platform.deepseek.com/)。默认模型为 DeepSeek v4 系列（生成整图 v4-pro，轻任务 v4-flash）；没有 DeepSeek key 也可以在页面设置里填任意 OpenAI 兼容接口使用。
 
 ## 常用命令
 
 ```bash
 cd 代码
-pnpm typecheck
-pnpm test
-pnpm build
+pnpm typecheck   # 类型检查
+pnpm test        # 12 个单元测试
+pnpm build       # tsc -b && vite build
 ```
 
-## 原型归档
+## 更多文档
 
-Claude 生成的单文件交互原型已保留在：
+- [HANDOFF.md](HANDOFF.md) — 产品决策与交互交接文档
+- [docs/理清-Claude原型.html](docs/理清-Claude原型.html) — 交互原型归档（视觉与交互参考，非正式应用）
 
-```text
-docs/理清-Claude原型.html
-```
+## 致谢
 
-它是视觉与交互参考，不再作为正式应用入口。
-
-## 目录说明
-
-```text
-代码/                     正式开发代码、依赖配置、构建产物
-docs/理清-Claude原型.html  Claude 交互原型归档
-HANDOFF.md                产品与交互交接说明
-README.md                 项目说明
-```
+本项目在开发过程中使用了 AI 编程工具（Claude / Codex / Brave on Hermes）辅助原型与实现。
