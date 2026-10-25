@@ -43,7 +43,6 @@ API key 获取：[DeepSeek 开放平台](https://platform.deepseek.com/)。默�
 ## 常用命令
 
 ```bash
-cd 代码
 pnpm typecheck   # 类型检查
 pnpm test        # 12 个单元测试
 pnpm build       # tsc -b && vite build
