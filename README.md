@@ -19,7 +19,7 @@
 - **折叠/展开**子树
 - **导出 PNG 图片**、**复制 PlantUML** 代码
 - **历史记录**：脑图存 localStorage，刷新不丢
-- **自定义模型**：设置面板可切换 provider / 模型 / baseUrl / API key（兼容 OpenAI 兼容接口，如 OpenRouter、GLM 系列），key 只存在你自己的浏览器 localStorage，由本机后端转发，不经过第三方服务器
+- **自定义模型**：设置面板可切换 provider / 模型 / baseUrl / API key（兼容 OpenAI 兼容接口，如 OpenRouter、GLM 系列），key 保存在当前浏览器 localStorage，请求经本机后端发往所选模型服务，模型服务会接收所需凭据。不要在共享浏览器上保存私人 key。
 - **测试**：12 个单元测试覆盖 schema 归一化、PlantUML 生成、布局等核心逻辑
 
 MVP 边界（明确没做）：登录、多设备同步、协作、移动端。数据只存本机浏览器 localStorage。
@@ -29,7 +29,8 @@ MVP 边界（明确没做）：登录、多设备同步、协作、移动端。�
 环境要求：Node.js ≥ 20，pnpm ≥ 10（实测 Node 22 / pnpm 11）。
 
 ```bash
-cd 代码
+git clone https://github.com/zxd-666/liqing.git
+cd liqing/代码
 pnpm install
 cp .env.example .env   # .env 中填 DEEPSEEK_API_KEY
 pnpm dev
